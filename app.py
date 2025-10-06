@@ -5,12 +5,12 @@ app = Flask(__name__)
 
 # === CONFIGURATION ===
 PARTNER_ID = 2013146
-PARTNER_KEY = "shpkYOURKEYHERE"   # <-- replace with your real partner key
+PARTNER_KEY = "shpk62586365587979465a78544c795443456242756b64645076684258616459"   # <-- replace with your real partner key
 SHOP_ID = 706762797
 HOST = "https://partner.shopeemobile.com"
 
 # Change to your Render URL later
-REDIRECT_URL = "https://shopee-api.onrender.com/callback"
+REDIRECT_URL = "https://shopee-app-api.onrender.com/callback"
 
 TOKEN_FILE = "tokens.json"
 
