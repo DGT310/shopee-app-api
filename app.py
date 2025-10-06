@@ -157,3 +157,17 @@ def auto_refresh():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
+@app.route("/check_time")
+def check_time():
+    local_ts = int(time.time())
+    try:
+        res = requests.get("https://partner.test-stable.shopeemobile.com/api/v2/public/get_shopee_time", timeout=5).json()
+        shopee_ts = int(res.get("timestamp", 0))
+    except Exception:
+        shopee_ts = 0
+    return jsonify({
+        "local_time": local_ts,
+        "shopee_time": shopee_ts,
+        "difference_seconds": shopee_ts - local_ts
+    })
