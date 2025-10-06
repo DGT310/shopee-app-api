@@ -27,29 +27,27 @@ def load_tokens():
         return json.load(f)
 
 
-# === Utility: Get Shopee server time ===
+# === Utility: Get Shopee server time (fixed) ===
 def get_shopee_timestamp():
     """
-    Try both live and test-stable Shopee time servers.
-    Fallback to local system time if both fail.
+    Always use Shopee test-stable time server since live /public/get_shopee_time
+    often returns error_not_found. Falls back to local time if unreachable.
     """
-    for url in [
-        "https://partner.shopeemobile.com/api/v2/public/get_shopee_time",      # live
-        "https://partner.test-stable.shopeemobile.com/api/v2/public/get_shopee_time"  # test
-    ]:
-        try:
-            res = requests.get(url, timeout=5).json()
-            if "timestamp" in res:
-                print(f"✅ Using Shopee time from {url}: {res['timestamp']}")
-                return int(res["timestamp"])
-            else:
-                print(f"⚠️ Shopee time fetch error from {url}: {res}")
-        except Exception as e:
-            print(f"⚠️ Error fetching Shopee time from {url}: {e}")
+    try:
+        url = "https://partner.test-stable.shopeemobile.com/api/v2/public/get_shopee_time"
+        res = requests.get(url, timeout=5).json()
+        local_ts = int(time.time())
 
-    local_ts = int(time.time())
-    print(f"⚠️ Using local timestamp as fallback: {local_ts}")
-    return local_ts
+        if "timestamp" in res:
+            shopee_ts = int(res["timestamp"])
+            print(f"✅ Shopee time: {shopee_ts}, Local time: {local_ts}, Diff: {shopee_ts - local_ts}s")
+            return shopee_ts
+        else:
+            print(f"⚠️ Shopee time fetch error: {res}")
+            return local_ts
+    except Exception as e:
+        print(f"⚠️ Cannot fetch Shopee time: {e}")
+        return int(time.time())
 
 
 @app.route("/")
