@@ -50,7 +50,8 @@ def callback():
     if not code or not shop_id:
         return jsonify({"error": "Missing code or shop_id", "raw_query": raw_query})
 
-    # ✅ Handle Shopee returning hex-encoded codes (e.g. "4d676e55585973..." instead of "MngUXYss...")
+    # ✅ Decode hex-encoded Shopee code if necessary
+    import binascii
     try:
         if all(c in "0123456789abcdefABCDEF" for c in code):
             decoded_code = binascii.unhexlify(code).decode("utf-8")
@@ -61,8 +62,8 @@ def callback():
     path = "/api/v2/auth/token/get"
     timestamp = int(time.time())
 
-    # ✅ Correct base string format
-    base_string = f"{PARTNER_ID}{path}{timestamp}{code}{shop_id}"
+    # ✅ FIX: shop_id is NOT part of base string for this endpoint
+    base_string = f"{PARTNER_ID}{path}{timestamp}{code}"
     sign = hmac.new(PARTNER_KEY.encode("utf-8"), base_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
     url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
@@ -127,3 +128,4 @@ def auto_refresh():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
