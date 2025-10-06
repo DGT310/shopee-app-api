@@ -41,15 +41,17 @@ def authorize():
 def callback():
     code = request.args.get("code")
     shop_id = request.args.get("shop_id")
-    if not code:
-        return "❌ No code received from Shopee."
+
+    if not code or not shop_id:
+        return "❌ Missing code or shop_id."
 
     path = "/api/v2/auth/token/get"
     timestamp = int(time.time())
 
-    # ✅ FIXED BASE STRING — include shop_id
-    base_string = f"{PARTNER_ID}{path}{timestamp}{code}{shop_id}"
-    sign = hmac.new(PARTNER_KEY.encode(), base_string.encode(), hashlib.sha256).hexdigest()
+    # ✅ Force everything to string, ensure encoding correctness
+    base_string = f"{str(PARTNER_ID)}{path}{str(timestamp)}{str(code)}{str(shop_id)}"
+    key_bytes = PARTNER_KEY.encode("utf-8")
+    sign = hmac.new(key_bytes, base_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
     url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
 
@@ -59,9 +61,17 @@ def callback():
         "partner_id": PARTNER_ID
     }
 
-    res = requests.post(url, json=payload).json()
-    save_tokens(res)
-    return jsonify(res)
+    headers = {"Content-Type": "application/json"}
+    response = requests.post(url, json=payload, headers=headers)
+    result = response.json()
+
+    # Save token result
+    save_tokens(result)
+    return jsonify({
+        "debug_base_string": base_string,
+        "debug_sign": sign,
+        "api_response": result
+    })
 
 @app.route("/refresh_token")
 def refresh_token():
@@ -87,4 +97,5 @@ def refresh_token():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
 
