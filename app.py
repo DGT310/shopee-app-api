@@ -46,15 +46,19 @@ def callback():
 
     path = "/api/v2/auth/token/get"
     timestamp = int(time.time())
-    base_string = f"{PARTNER_ID}{path}{timestamp}{code}"
+
+    # ✅ FIXED BASE STRING — include shop_id
+    base_string = f"{PARTNER_ID}{path}{timestamp}{code}{shop_id}"
     sign = hmac.new(PARTNER_KEY.encode(), base_string.encode(), hashlib.sha256).hexdigest()
 
     url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
+
     payload = {
         "code": code,
         "shop_id": int(shop_id),
         "partner_id": PARTNER_ID
     }
+
     res = requests.post(url, json=payload).json()
     save_tokens(res)
     return jsonify(res)
@@ -83,3 +87,4 @@ def refresh_token():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
