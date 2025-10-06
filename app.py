@@ -155,19 +155,29 @@ def auto_refresh():
     return jsonify({"message": "Token still valid.", "data": data})
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
+# === DIAGNOSTIC: Compare local vs Shopee time ===
 @app.route("/check_time")
 def check_time():
     local_ts = int(time.time())
     try:
-        res = requests.get("https://partner.test-stable.shopeemobile.com/api/v2/public/get_shopee_time", timeout=5).json()
+        res = requests.get(
+            "https://partner.test-stable.shopeemobile.com/api/v2/public/get_shopee_time",
+            timeout=5
+        ).json()
         shopee_ts = int(res.get("timestamp", 0))
-    except Exception:
+    except Exception as e:
+        print("⚠️ Error fetching Shopee time:", e)
         shopee_ts = 0
+
+    diff = shopee_ts - local_ts
+    print(f"🕒 Shopee time diff: {diff}s")
     return jsonify({
         "local_time": local_ts,
         "shopee_time": shopee_ts,
-        "difference_seconds": shopee_ts - local_ts
+        "difference_seconds": diff
     })
+
+
+# === Run server ===
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
