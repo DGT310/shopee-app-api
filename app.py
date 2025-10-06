@@ -26,19 +26,30 @@ def load_tokens():
     with open(TOKEN_FILE, "r") as f:
         return json.load(f)
 
+
 # === Utility: Get Shopee server time ===
 def get_shopee_timestamp():
-    try:
-        url = f"{HOST}/api/v2/public/get_shopee_time"
-        res = requests.get(url, timeout=5).json()
-        if "timestamp" in res:
-            return int(res["timestamp"])
-        else:
-            print("⚠️ Shopee time fetch error:", res)
-            return int(time.time())
-    except Exception as e:
-        print("⚠️ Cannot fetch Shopee time:", e)
-        return int(time.time())
+    """
+    Try both live and test-stable Shopee time servers.
+    Fallback to local system time if both fail.
+    """
+    for url in [
+        "https://partner.shopeemobile.com/api/v2/public/get_shopee_time",      # live
+        "https://partner.test-stable.shopeemobile.com/api/v2/public/get_shopee_time"  # test
+    ]:
+        try:
+            res = requests.get(url, timeout=5).json()
+            if "timestamp" in res:
+                print(f"✅ Using Shopee time from {url}: {res['timestamp']}")
+                return int(res["timestamp"])
+            else:
+                print(f"⚠️ Shopee time fetch error from {url}: {res}")
+        except Exception as e:
+            print(f"⚠️ Error fetching Shopee time from {url}: {e}")
+
+    local_ts = int(time.time())
+    print(f"⚠️ Using local timestamp as fallback: {local_ts}")
+    return local_ts
 
 
 @app.route("/")
@@ -53,9 +64,14 @@ def authorize():
     timestamp = get_shopee_timestamp()
 
     base_string = f"{PARTNER_ID}{path}{timestamp}"
-    sign = hmac.new(PARTNER_KEY.encode("utf-8"), base_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    sign = hmac.new(
+        PARTNER_KEY.encode("utf-8"),
+        base_string.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
 
     url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}&redirect={REDIRECT_URL}"
+    print("🔗 Authorization URL:", url)
     return redirect(url)
 
 
@@ -69,7 +85,7 @@ def callback():
     if not code or not shop_id:
         return jsonify({"error": "Missing code or shop_id", "raw_query": raw_query})
 
-    # ✅ Try decode hex code if Shopee encoded it
+    # ✅ Decode hex if Shopee encoded the code
     try:
         if all(c in "0123456789abcdefABCDEF" for c in code):
             decoded_code = binascii.unhexlify(code).decode("utf-8")
@@ -77,15 +93,18 @@ def callback():
     except Exception:
         pass
 
-    # Wait a bit for Shopee to process
-    time.sleep(2)
+    time.sleep(2)  # small delay to ensure Shopee is ready
 
     path = "/api/v2/auth/token/get"
     timestamp = get_shopee_timestamp()
 
     # ✅ shop_id is NOT part of base string
     base_string = f"{PARTNER_ID}{path}{timestamp}{code}"
-    sign = hmac.new(PARTNER_KEY.encode("utf-8"), base_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    sign = hmac.new(
+        PARTNER_KEY.encode("utf-8"),
+        base_string.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
 
     url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
 
@@ -120,7 +139,11 @@ def refresh_token():
     timestamp = get_shopee_timestamp()
 
     base_string = f"{PARTNER_ID}{path}{timestamp}"
-    sign = hmac.new(PARTNER_KEY.encode("utf-8"), base_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    sign = hmac.new(
+        PARTNER_KEY.encode("utf-8"),
+        base_string.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
 
     url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
     payload = {
