@@ -39,19 +39,19 @@ def authorize():
 
 @app.route("/callback")
 def callback():
+    raw_query = request.query_string.decode("utf-8")
     code = request.args.get("code")
     shop_id = request.args.get("shop_id")
 
     if not code or not shop_id:
-        return "❌ Missing code or shop_id."
+        return jsonify({"error": "Missing code or shop_id", "raw_query": raw_query})
 
     path = "/api/v2/auth/token/get"
     timestamp = int(time.time())
 
-    # ✅ Force everything to string, ensure encoding correctness
-    base_string = f"{str(PARTNER_ID)}{path}{str(timestamp)}{str(code)}{str(shop_id)}"
-    key_bytes = PARTNER_KEY.encode("utf-8")
-    sign = hmac.new(key_bytes, base_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    # ✅ Keep code exactly as Shopee sends it, do not alter or re-encode
+    base_string = f"{PARTNER_ID}{path}{timestamp}{code}{shop_id}"
+    sign = hmac.new(PARTNER_KEY.encode("utf-8"), base_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
     url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
 
@@ -62,16 +62,16 @@ def callback():
     }
 
     headers = {"Content-Type": "application/json"}
-    response = requests.post(url, json=payload, headers=headers)
-    result = response.json()
+    res = requests.post(url, json=payload, headers=headers).json()
 
-    # Save token result
-    save_tokens(result)
+    save_tokens(res)
     return jsonify({
         "debug_base_string": base_string,
         "debug_sign": sign,
-        "api_response": result
+        "api_response": res,
+        "raw_query": raw_query
     })
+
 
 @app.route("/refresh_token")
 def refresh_token():
@@ -97,5 +97,6 @@ def refresh_token():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
 
 
