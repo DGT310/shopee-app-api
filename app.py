@@ -27,24 +27,29 @@ def load_tokens():
         return json.load(f)
 
 
-# === Utility: Get Shopee LIVE server time ===
+# === Utility: Get timestamp (manual offset if Shopee time unavailable) ===
 def get_shopee_timestamp():
     """
-    Use live Shopee time API; if not available, use local system time (+2 s offset).
+    Shopee live / test time APIs may fail.
+    Use Render server time + manual offset (15 seconds) for signature consistency.
     """
     try:
+        # Try live Shopee endpoint first
         url = "https://partner.shopeemobile.com/api/v2/public/get_shopee_time"
         res = requests.get(url, timeout=5).json()
         if "timestamp" in res:
             ts = int(res["timestamp"])
             print(f"✅ Using Shopee LIVE time: {ts}")
             return ts
-        print("⚠️ Shopee LIVE time API returned:", res)
+        print(f"⚠️ Shopee LIVE time unavailable, response: {res}")
     except Exception as e:
         print(f"⚠️ Cannot fetch Shopee LIVE time: {e}")
-    local_ts = int(time.time()) + 2
-    print(f"⚠️ Using local system time (fallback): {local_ts}")
-    return local_ts
+
+    # Manual offset if Shopee time unavailable
+    local_ts = int(time.time())
+    adjusted_ts = local_ts + 15  # Adjust if needed (+/- few seconds)
+    print(f"⚠️ Using adjusted local time: {adjusted_ts} (+15s offset)")
+    return adjusted_ts
 
 
 @app.route("/")
@@ -80,10 +85,11 @@ def callback():
     if not code or not shop_id:
         return jsonify({"error": "Missing code or shop_id", "raw_query": raw_query})
 
-    # Decode hex if needed
+    # Decode hex code if necessary
     try:
         if all(c in "0123456789abcdefABCDEF" for c in code):
-            code = binascii.unhexlify(code).decode("utf-8")
+            decoded_code = binascii.unhexlify(code).decode("utf-8")
+            code = decoded_code
     except Exception:
         pass
 
@@ -155,7 +161,7 @@ def auto_refresh():
     return jsonify({"message": "Token still valid.", "data": data})
 
 
-# === DIAGNOSTIC: Compare local vs Shopee time ===
+# === DIAGNOSTIC: Compare local vs Shopee test-stable time ===
 @app.route("/check_time")
 def check_time():
     local_ts = int(time.time())
@@ -166,7 +172,7 @@ def check_time():
         ).json()
         shopee_ts = int(res.get("timestamp", 0))
     except Exception as e:
-        print("⚠️ Error fetching Shopee time:", e)
+        print("⚠️ Error fetching Shopee test-stable time:", e)
         shopee_ts = 0
 
     diff = shopee_ts - local_ts
