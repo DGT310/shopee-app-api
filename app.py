@@ -27,27 +27,35 @@ def load_tokens():
         return json.load(f)
 
 
-# === Utility: Get Shopee server time (fixed) ===
+# === Utility: Get Shopee server time (Hybrid Method) ===
 def get_shopee_timestamp():
     """
-    Always use Shopee test-stable time server since live /public/get_shopee_time
-    often returns error_not_found. Falls back to local time if unreachable.
+    Try live Shopee time first; fallback to test-stable if needed.
+    Add small +2s offset for network latency tolerance.
     """
+    local_ts = int(time.time())
     try:
-        url = "https://partner.test-stable.shopeemobile.com/api/v2/public/get_shopee_time"
-        res = requests.get(url, timeout=5).json()
-        local_ts = int(time.time())
-
+        # Try LIVE environment first
+        res = requests.get("https://partner.shopeemobile.com/api/v2/public/get_shopee_time", timeout=5).json()
         if "timestamp" in res:
             shopee_ts = int(res["timestamp"])
-            print(f"✅ Shopee time: {shopee_ts}, Local time: {local_ts}, Diff: {shopee_ts - local_ts}s")
+            print(f"✅ Using LIVE Shopee time: {shopee_ts}")
             return shopee_ts
-        else:
-            print(f"⚠️ Shopee time fetch error: {res}")
-            return local_ts
+
+        print("⚠️ Live Shopee time returned error:", res)
+
+        # Try TEST-STABLE fallback
+        res = requests.get("https://partner.test-stable.shopeemobile.com/api/v2/public/get_shopee_time", timeout=5).json()
+        if "timestamp" in res:
+            shopee_ts = int(res["timestamp"])
+            print(f"✅ Using TEST-STABLE Shopee time: {shopee_ts}")
+            return shopee_ts + 2  # small offset for latency
+
     except Exception as e:
-        print(f"⚠️ Cannot fetch Shopee time: {e}")
-        return int(time.time())
+        print("⚠️ Cannot fetch Shopee time:", e)
+
+    print(f"⚠️ Using local system time: {local_ts}")
+    return local_ts + 2  # final fallback with offset
 
 
 @app.route("/")
@@ -83,7 +91,7 @@ def callback():
     if not code or not shop_id:
         return jsonify({"error": "Missing code or shop_id", "raw_query": raw_query})
 
-    # ✅ Decode hex if Shopee encoded the code
+    # ✅ Decode hex code if Shopee encoded it
     try:
         if all(c in "0123456789abcdefABCDEF" for c in code):
             decoded_code = binascii.unhexlify(code).decode("utf-8")
@@ -91,7 +99,8 @@ def callback():
     except Exception:
         pass
 
-    time.sleep(2)  # small delay to ensure Shopee is ready
+    # Wait a bit for Shopee to process the auth code
+    time.sleep(2)
 
     path = "/api/v2/auth/token/get"
     timestamp = get_shopee_timestamp()
