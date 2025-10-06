@@ -1,6 +1,14 @@
 from flask import Flask, request, redirect, jsonify
 import time, hmac, hashlib, requests, os, json
 
+# === Force UTC timezone ===
+os.environ["TZ"] = "UTC"
+try:
+    time.tzset()
+except AttributeError:
+    # Windows / some Render images don’t have tzset
+    pass
+
 app = Flask(__name__)
 
 # === CONFIGURATION (LIVE MODE) ===
@@ -8,12 +16,11 @@ PARTNER_ID = 2013146
 PARTNER_KEY = "shpk62586365587979465a78544c795443456242756b64645076684258616459"
 SHOP_ID = 706762797
 HOST = "https://partner.shopeemobile.com"
-
-# Must exactly match Shopee App setting (domain only in console)
 REDIRECT_URL = "https://shopee-app-api.onrender.com/callback"
-
 TOKEN_FILE = "tokens.json"
 
+
+# === Utility: Save / Load token ===
 def save_tokens(data):
     with open(TOKEN_FILE, "w") as f:
         json.dump(data, f, indent=2)
@@ -24,34 +31,30 @@ def load_tokens():
     with open(TOKEN_FILE, "r") as f:
         return json.load(f)
 
+
+# === Utility: Generate timestamp (UTC + configurable offset) ===
 def get_shopee_timestamp():
-    # Try live time API; fallback to local + small offset
-    try:
-        res = requests.get(
-            "https://partner.shopeemobile.com/api/v2/public/get_shopee_time",
-            timeout=5
-        ).json()
-        if "timestamp" in res:
-            ts = int(res["timestamp"])
-            print(f"✅ Using Shopee LIVE time: {ts}")
-            return ts
-        print("⚠️ Shopee LIVE time API returned:", res)
-    except Exception as e:
-        print(f"⚠️ Cannot fetch Shopee LIVE time: {e}")
-    local_ts = int(time.time()) + 10  # small cushion for network latency
-    print(f"⚠️ Using adjusted local time: {local_ts} (+10s)")
-    return local_ts
+    """
+    Shopee LIVE API disables /public/get_shopee_time.
+    Use UTC system clock + optional offset for alignment.
+    """
+    # read offset (seconds) from environment variable or default to 0
+    offset = int(os.getenv("TIME_OFFSET", "0"))
+    ts = int(time.time()) + offset
+    print(f"🕒 Using UTC timestamp: {ts} (offset {offset}s)")
+    return ts
+
 
 @app.route("/")
 def home():
-    return "✅ Shopee Flask API Server Running (LIVE Mode)"
+    return "✅ Shopee Flask API Server Running (LIVE Mode, UTC clock)"
 
-# STEP 1: Authorize shop
+
+# === STEP 1: Authorize shop ===
 @app.route("/authorize")
 def authorize():
     path = "/api/v2/shop/auth_partner"
     timestamp = get_shopee_timestamp()
-
     base_string = f"{PARTNER_ID}{path}{timestamp}"
     sign = hmac.new(
         PARTNER_KEY.encode("utf-8"),
@@ -59,31 +62,28 @@ def authorize():
         hashlib.sha256
     ).hexdigest()
 
-    url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}&redirect={REDIRECT_URL}"
-    print("🔗 Auth URL:", url)
+    url = (
+        f"{HOST}{path}?partner_id={PARTNER_ID}"
+        f"&timestamp={timestamp}&sign={sign}&redirect={REDIRECT_URL}"
+    )
+    print("🔗 Authorization URL:", url)
     return redirect(url)
 
-# STEP 2: Callback from Shopee
+
+# === STEP 2: Callback from Shopee ===
 @app.route("/callback")
 def callback():
     raw_query = request.query_string.decode("utf-8")
-    code = request.args.get("code")           # ← keep EXACT string from query
+    code = request.args.get("code")
     shop_id = request.args.get("shop_id")
 
     if not code or not shop_id:
         return jsonify({"error": "Missing code or shop_id", "raw_query": raw_query})
 
-    # DO NOT decode/transform the code. Use it exactly as received.
-    used_code = code
-
-    # Optional tiny delay to ensure Shopee is ready
-    time.sleep(1)
-
+    # keep code exactly as received (do NOT decode)
     path = "/api/v2/auth/token/get"
     timestamp = get_shopee_timestamp()
-
-    # Base string per Shopee v2 spec: partner_id + path + timestamp + code
-    base_string = f"{PARTNER_ID}{path}{timestamp}{used_code}"
+    base_string = f"{PARTNER_ID}{path}{timestamp}{code}"
     sign = hmac.new(
         PARTNER_KEY.encode("utf-8"),
         base_string.encode("utf-8"),
@@ -91,25 +91,21 @@ def callback():
     ).hexdigest()
 
     url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
-    payload = {
-        "code": used_code,             # ← send the exact code string
-        "shop_id": int(shop_id),
-        "partner_id": PARTNER_ID
-    }
-
+    payload = {"code": code, "shop_id": int(shop_id), "partner_id": PARTNER_ID}
     headers = {"Content-Type": "application/json"}
+
     res = requests.post(url, json=payload, headers=headers).json()
     save_tokens(res)
-
     return jsonify({
-        "used_code": used_code,
+        "used_code": code,
         "debug_base_string": base_string,
         "debug_sign": sign,
         "api_response": res,
         "raw_query": raw_query
     })
 
-# STEP 3: Refresh token
+
+# === STEP 3: Refresh token ===
 @app.route("/refresh_token")
 def refresh_token():
     data = load_tokens()
@@ -119,7 +115,6 @@ def refresh_token():
 
     path = "/api/v2/auth/access_token/get"
     timestamp = get_shopee_timestamp()
-
     base_string = f"{PARTNER_ID}{path}{timestamp}"
     sign = hmac.new(
         PARTNER_KEY.encode("utf-8"),
@@ -139,7 +134,8 @@ def refresh_token():
     save_tokens(res)
     return jsonify(res)
 
-# STEP 4: Auto-refresh helper
+
+# === STEP 4: Auto-refresh helper ===
 @app.route("/auto_refresh")
 def auto_refresh():
     data = load_tokens()
@@ -149,25 +145,15 @@ def auto_refresh():
         return refresh_token()
     return jsonify({"message": "Token still valid.", "data": data})
 
-# Diagnostic
+
+# === Diagnostic: see UTC & Render clock ===
 @app.route("/check_time")
 def check_time():
-    local_ts = int(time.time())
-    try:
-        res = requests.get(
-            "https://partner.test-stable.shopeemobile.com/api/v2/public/get_shopee_time",
-            timeout=5
-        ).json()
-        shopee_ts = int(res.get("timestamp", 0))
-    except Exception as e:
-        print("⚠️ Error fetching Shopee test-stable time:", e)
-        shopee_ts = 0
-    diff = shopee_ts - local_ts
     return jsonify({
-        "local_time": local_ts,
-        "shopee_time": shopee_ts,
-        "difference_seconds": diff
+        "utc_time": int(time.time()),
+        "offset_used": int(os.getenv("TIME_OFFSET", "0"))
     })
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
