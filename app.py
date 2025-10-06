@@ -3,13 +3,13 @@ import time, hmac, hashlib, requests, os, json, binascii
 
 app = Flask(__name__)
 
-# === CONFIGURATION ===
+# === CONFIGURATION (LIVE MODE) ===
 PARTNER_ID = 2013146
 PARTNER_KEY = "shpk62586365587979465a78544c795443456242756b64645076684258616459"
 SHOP_ID = 706762797
 HOST = "https://partner.shopeemobile.com"
 
-# ✅ Must match your Shopee “Live Redirect URL Domain”
+# ✅ Must exactly match your Shopee App setting
 REDIRECT_URL = "https://shopee-app-api.onrender.com/callback"
 
 TOKEN_FILE = "tokens.json"
@@ -27,40 +27,29 @@ def load_tokens():
         return json.load(f)
 
 
-# === Utility: Get Shopee server time (Hybrid Method) ===
+# === Utility: Get Shopee LIVE server time ===
 def get_shopee_timestamp():
     """
-    Try live Shopee time first; fallback to test-stable if needed.
-    Add small +2s offset for network latency tolerance.
+    Use live Shopee time API; if not available, use local system time (+2 s offset).
     """
-    local_ts = int(time.time())
     try:
-        # Try LIVE environment first
-        res = requests.get("https://partner.shopeemobile.com/api/v2/public/get_shopee_time", timeout=5).json()
+        url = "https://partner.shopeemobile.com/api/v2/public/get_shopee_time"
+        res = requests.get(url, timeout=5).json()
         if "timestamp" in res:
-            shopee_ts = int(res["timestamp"])
-            print(f"✅ Using LIVE Shopee time: {shopee_ts}")
-            return shopee_ts
-
-        print("⚠️ Live Shopee time returned error:", res)
-
-        # Try TEST-STABLE fallback
-        res = requests.get("https://partner.test-stable.shopeemobile.com/api/v2/public/get_shopee_time", timeout=5).json()
-        if "timestamp" in res:
-            shopee_ts = int(res["timestamp"])
-            print(f"✅ Using TEST-STABLE Shopee time: {shopee_ts}")
-            return shopee_ts + 2  # small offset for latency
-
+            ts = int(res["timestamp"])
+            print(f"✅ Using Shopee LIVE time: {ts}")
+            return ts
+        print("⚠️ Shopee LIVE time API returned:", res)
     except Exception as e:
-        print("⚠️ Cannot fetch Shopee time:", e)
-
-    print(f"⚠️ Using local system time: {local_ts}")
-    return local_ts + 2  # final fallback with offset
+        print(f"⚠️ Cannot fetch Shopee LIVE time: {e}")
+    local_ts = int(time.time()) + 2
+    print(f"⚠️ Using local system time (fallback): {local_ts}")
+    return local_ts
 
 
 @app.route("/")
 def home():
-    return "✅ Shopee Flask API Server Running"
+    return "✅ Shopee Flask API Server Running (LIVE Mode)"
 
 
 # === STEP 1: Authorize shop ===
@@ -71,13 +60,13 @@ def authorize():
 
     base_string = f"{PARTNER_ID}{path}{timestamp}"
     sign = hmac.new(
-        PARTNER_KEY.encode("utf-8"),
-        base_string.encode("utf-8"),
+        PARTNER_KEY.encode(),
+        base_string.encode(),
         hashlib.sha256
     ).hexdigest()
 
     url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}&redirect={REDIRECT_URL}"
-    print("🔗 Authorization URL:", url)
+    print("🔗 Auth URL:", url)
     return redirect(url)
 
 
@@ -91,40 +80,31 @@ def callback():
     if not code or not shop_id:
         return jsonify({"error": "Missing code or shop_id", "raw_query": raw_query})
 
-    # ✅ Decode hex code if Shopee encoded it
+    # Decode hex if needed
     try:
         if all(c in "0123456789abcdefABCDEF" for c in code):
-            decoded_code = binascii.unhexlify(code).decode("utf-8")
-            code = decoded_code
+            code = binascii.unhexlify(code).decode("utf-8")
     except Exception:
         pass
 
-    # Wait a bit for Shopee to process the auth code
     time.sleep(2)
 
     path = "/api/v2/auth/token/get"
     timestamp = get_shopee_timestamp()
-
-    # ✅ shop_id is NOT part of base string
     base_string = f"{PARTNER_ID}{path}{timestamp}{code}"
     sign = hmac.new(
-        PARTNER_KEY.encode("utf-8"),
-        base_string.encode("utf-8"),
+        PARTNER_KEY.encode(),
+        base_string.encode(),
         hashlib.sha256
     ).hexdigest()
 
     url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
-
-    payload = {
-        "code": code,
-        "shop_id": int(shop_id),
-        "partner_id": PARTNER_ID
-    }
-
+    payload = {"code": code, "shop_id": int(shop_id), "partner_id": PARTNER_ID}
     headers = {"Content-Type": "application/json"}
-    res = requests.post(url, json=payload, headers=headers).json()
 
+    res = requests.post(url, json=payload, headers=headers).json()
     save_tokens(res)
+
     return jsonify({
         "decoded_code": code,
         "debug_base_string": base_string,
@@ -144,11 +124,10 @@ def refresh_token():
 
     path = "/api/v2/auth/access_token/get"
     timestamp = get_shopee_timestamp()
-
     base_string = f"{PARTNER_ID}{path}{timestamp}"
     sign = hmac.new(
-        PARTNER_KEY.encode("utf-8"),
-        base_string.encode("utf-8"),
+        PARTNER_KEY.encode(),
+        base_string.encode(),
         hashlib.sha256
     ).hexdigest()
 
@@ -161,7 +140,6 @@ def refresh_token():
 
     headers = {"Content-Type": "application/json"}
     res = requests.post(url, json=payload, headers=headers).json()
-
     save_tokens(res)
     return jsonify(res)
 
@@ -169,13 +147,10 @@ def refresh_token():
 # === STEP 4: Auto-refresh helper ===
 @app.route("/auto_refresh")
 def auto_refresh():
-    """Automatically refresh token if close to expiry."""
     data = load_tokens()
     if not data:
         return jsonify({"error": "No token data found."})
-
-    expire_time = data.get("expire_in", 0)
-    if expire_time < 600:  # less than 10 minutes remaining
+    if data.get("expire_in", 0) < 600:
         return refresh_token()
     return jsonify({"message": "Token still valid.", "data": data})
 
