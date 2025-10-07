@@ -16,26 +16,40 @@ def home():
 
 @app.route("/callback")
 def callback():
-    """Shopee redirects here with ?code=...&shop_id=..."""
+    import requests, hmac, hashlib, time, json
+
     code = request.args.get("code")
     shop_id = request.args.get("shop_id")
 
     if not code or not shop_id:
-        return "❌ Missing code or shop_id from Shopee redirect.", 400
+        return "❌ Missing code or shop_id", 400
 
-    # Step 1: Generate sign
-    path = "/api/v2/auth/token/get"
-    timestamp = int(time.time())
-    base_string = f"{PARTNER_ID}{path}{timestamp}{code}"
+    # === Shopee Live App Credentials ===
+    PARTNER_ID = 2013146
+    PARTNER_KEY = "shpk62586365587979465a78544c795443456242756b64645076684258616459"
+    HOST = "https://partner.shopeemobile.com"
+    PATH = "/api/v2/auth/token/get"
 
+    # === Step 1: Use correct UTC timestamp ===
+    timestamp = int(time.time())  # Render is UTC, this is correct
+
+    # === Step 2: Build correct base string ===
+    base_string = f"{PARTNER_ID}{PATH}{timestamp}{code}"
+
+    # === Step 3: Generate HMAC-SHA256 signature ===
     sign = hmac.new(
-        PARTNER_KEY.encode(),
-        base_string.encode(),
+        PARTNER_KEY.encode("utf-8"),
+        base_string.encode("utf-8"),
         hashlib.sha256
     ).hexdigest()
 
-    # Step 2: Request access token
-    url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
+    print("🔹Base string:", base_string)
+    print("🔹Sign:", sign)
+
+    # === Step 4: Build request URL ===
+    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
+
+    # === Step 5: Request access token ===
     payload = {
         "code": code,
         "shop_id": int(shop_id),
@@ -48,17 +62,8 @@ def callback():
     except Exception:
         data = {"raw": res.text}
 
-    print("🔗 URL:", url)
-    print("📦 Payload:", payload)
     print("🧾 Response:", json.dumps(data, indent=2))
-
-    # Step 3: Return the result
-    return jsonify({
-        "status": "success",
-        "message": "Shopee token exchange complete!",
-        "request_id": data.get("request_id"),
-        "response": data
-    })
+    return data
 
 # For Render health check
 @app.route("/ping")
@@ -67,3 +72,4 @@ def ping():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
