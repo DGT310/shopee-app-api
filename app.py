@@ -91,6 +91,18 @@ def callback():
             "raw_query": raw_query
         })
 
+    # ✅ Detect and decode hex-encoded code
+    try:
+        if all(c in "0123456789abcdefABCDEF" for c in code) and len(code) % 2 == 0:
+            decoded = bytes.fromhex(code).decode("utf-8")
+            print(f"🔍 Detected HEX code, decoded: {decoded}")
+            code = decoded
+        else:
+            print("✅ Code appears to be plain text.")
+    except Exception as e:
+        print(f"⚠️ Code decode failed: {e}")
+
+    # === Build signature ===
     path = "/api/v2/auth/token/get"
     timestamp = get_shopee_timestamp()
     base_string = f"{PARTNER_ID}{path}{timestamp}{code}"
@@ -103,7 +115,7 @@ def callback():
     url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
 
     payload = {
-        "code": code,              # must be raw (not decoded)
+        "code": code,
         "shop_id": int(shop_id),
         "partner_id": PARTNER_ID
     }
@@ -121,7 +133,6 @@ def callback():
         "api_response": res,
         "raw_query": raw_query
     })
-
 
 # === STEP 3: Refresh access token ===
 @app.route("/refresh_token")
@@ -185,3 +196,4 @@ def check_time():
 # === Run Flask app ===
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
