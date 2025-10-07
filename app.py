@@ -6,7 +6,7 @@ os.environ["TZ"] = "UTC"
 try:
     time.tzset()
 except AttributeError:
-    # Windows / some Render images don’t have tzset
+    # Windows / some Render environments don’t support tzset()
     pass
 
 app = Flask(__name__)
@@ -15,46 +15,49 @@ app = Flask(__name__)
 PARTNER_ID = 2013146
 PARTNER_KEY = "shpk62586365587979465a78544c795443456242756b64645076684258616459"
 SHOP_ID = 706762797
-HOST = "https://partner.shopeemobile.com"
+HOST = "https://partner.shopeemobile.com"  # ✅ LIVE endpoint
 REDIRECT_URL = "https://shopee-app-api.onrender.com/callback"
 TOKEN_FILE = "tokens.json"
 
 
 # === Utility: Save / Load token ===
 def save_tokens(data):
+    """Save Shopee access and refresh tokens."""
     with open(TOKEN_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
 def load_tokens():
+    """Load stored tokens from file if available."""
     if not os.path.exists(TOKEN_FILE):
         return {}
     with open(TOKEN_FILE, "r") as f:
         return json.load(f)
 
 
-# === Utility: Generate timestamp (UTC + configurable offset) ===
+# === Utility: Generate valid 32-bit timestamp (Shopee requirement) ===
 def get_shopee_timestamp():
     """
-    Shopee LIVE API disables /public/get_shopee_time.
-    Use UTC system clock + optional offset for alignment.
+    Shopee requires timestamps as a 32-bit integer (seconds, not ms).
+    Add optional offset via TIME_OFFSET environment variable if needed.
     """
-    # read offset (seconds) from environment variable or default to 0
     offset = int(os.getenv("TIME_OFFSET", "0"))
-    ts = int(time.time()) + offset
+    ts = (int(time.time()) + offset) % 4294967295  # ✅ Safe 32-bit integer
     print(f"🕒 Using UTC timestamp: {ts} (offset {offset}s)")
     return ts
 
 
 @app.route("/")
 def home():
-    return "✅ Shopee Flask API Server Running (LIVE Mode, UTC clock)"
+    return "✅ Shopee Flask API Server Running (LIVE Mode, UTC-safe timestamp)"
 
 
 # === STEP 1: Authorize shop ===
 @app.route("/authorize")
 def authorize():
+    """Redirect user to Shopee authorization page."""
     path = "/api/v2/shop/auth_partner"
     timestamp = get_shopee_timestamp()
+
     base_string = f"{PARTNER_ID}{path}{timestamp}"
     sign = hmac.new(
         PARTNER_KEY.encode("utf-8"),
@@ -63,24 +66,31 @@ def authorize():
     ).hexdigest()
 
     url = (
-        f"{HOST}{path}?partner_id={PARTNER_ID}"
-        f"&timestamp={timestamp}&sign={sign}&redirect={REDIRECT_URL}"
+        f"{HOST}{path}"
+        f"?partner_id={PARTNER_ID}"
+        f"&timestamp={timestamp}"
+        f"&sign={sign}"
+        f"&redirect={REDIRECT_URL}"
     )
-    print("🔗 Authorization URL:", url)
+
+    print(f"🔗 Authorization URL: {url}")
     return redirect(url)
 
 
-# === STEP 2: Callback from Shopee ===
+# === STEP 2: Handle callback and exchange code for token ===
 @app.route("/callback")
 def callback():
+    """Handle Shopee redirect and exchange code for access token."""
     raw_query = request.query_string.decode("utf-8")
     code = request.args.get("code")
     shop_id = request.args.get("shop_id")
 
     if not code or not shop_id:
-        return jsonify({"error": "Missing code or shop_id", "raw_query": raw_query})
+        return jsonify({
+            "error": "Missing code or shop_id",
+            "raw_query": raw_query
+        })
 
-    # keep code exactly as received (do NOT decode)
     path = "/api/v2/auth/token/get"
     timestamp = get_shopee_timestamp()
     base_string = f"{PARTNER_ID}{path}{timestamp}{code}"
@@ -91,11 +101,19 @@ def callback():
     ).hexdigest()
 
     url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
-    payload = {"code": code, "shop_id": int(shop_id), "partner_id": PARTNER_ID}
+
+    payload = {
+        "code": code,              # must be raw (not decoded)
+        "shop_id": int(shop_id),
+        "partner_id": PARTNER_ID
+    }
     headers = {"Content-Type": "application/json"}
 
+    print("📤 Token Request:", url, payload)
     res = requests.post(url, json=payload, headers=headers).json()
+
     save_tokens(res)
+
     return jsonify({
         "used_code": code,
         "debug_base_string": base_string,
@@ -105,9 +123,10 @@ def callback():
     })
 
 
-# === STEP 3: Refresh token ===
+# === STEP 3: Refresh access token ===
 @app.route("/refresh_token")
 def refresh_token():
+    """Use the refresh token to get a new access token."""
     data = load_tokens()
     refresh_token = data.get("refresh_token")
     if not refresh_token:
@@ -130,6 +149,7 @@ def refresh_token():
     }
 
     headers = {"Content-Type": "application/json"}
+    print("🔁 Refresh Request:", url)
     res = requests.post(url, json=payload, headers=headers).json()
     save_tokens(res)
     return jsonify(res)
@@ -138,22 +158,30 @@ def refresh_token():
 # === STEP 4: Auto-refresh helper ===
 @app.route("/auto_refresh")
 def auto_refresh():
+    """Automatically refresh token if close to expiry."""
     data = load_tokens()
     if not data:
         return jsonify({"error": "No token data found."})
-    if data.get("expire_in", 0) < 600:
+
+    if data.get("expire_in", 0) < 600:  # 10 min before expiry
         return refresh_token()
-    return jsonify({"message": "Token still valid.", "data": data})
+
+    return jsonify({
+        "message": "Token still valid.",
+        "data": data
+    })
 
 
-# === Diagnostic: see UTC & Render clock ===
+# === Diagnostic: See current UTC time and offset ===
 @app.route("/check_time")
 def check_time():
+    """Compare UTC time and current offset."""
     return jsonify({
         "utc_time": int(time.time()),
         "offset_used": int(os.getenv("TIME_OFFSET", "0"))
     })
 
 
+# === Run Flask app ===
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
