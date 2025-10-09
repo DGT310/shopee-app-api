@@ -40,7 +40,6 @@ def callback():
     except:
         api_response = {"raw_response": res.text}
 
-    # === Debug info to verify ===
     debug = {
         "api_response": api_response,
         "debug_base_string": base_string,
@@ -54,4 +53,5 @@ if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
