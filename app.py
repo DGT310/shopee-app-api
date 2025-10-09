@@ -17,12 +17,13 @@ def hmac_sha256_hex(key: str, msg: str) -> str:
 
 def token_request(code_to_use: str, shop_id: int, timestamp: int):
     PATH = "/api/v2/auth/token/get"
-    base_string = f"{PARTNER_ID}{PATH}{timestamp}{code_to_use}"  # <- REQUIRED for token/get
+    # ✅ Correct base string (no code)
+    base_string = f"{PARTNER_ID}{PATH}{timestamp}"
     sign = hmac_sha256_hex(PARTNER_KEY, base_string)
 
     url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
     payload = {
-        "code": code_to_use,        # MUST match what was used in base_string
+        "code": code_to_use,
         "shop_id": shop_id,
         "partner_id": PARTNER_ID
     }
@@ -98,3 +99,4 @@ def ping():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
