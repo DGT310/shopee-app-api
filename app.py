@@ -3,53 +3,31 @@ import requests, hmac, hashlib, time, json
 
 app = Flask(__name__)
 
-# === LIVE CREDENTIALS ===
-PARTNER_ID = 2013146
-PARTNER_KEY = "shpk62586365587979465a78544c795443456242756b64645076684258616459"
-HOST = "https://partner.shopeemobile.com"
-
-# === ROUTES ===
+# === Test Environment Credentials ===
+PARTNER_ID = 1190367
+PARTNER_KEY = "shpk6f5070654e5a774a5a684f63776e7a53454e7049655767636b6a46466743"
+HOST = "https://partner.test-stable.shopeemobile.com"
 
 @app.route("/")
 def home():
-    return "✅ Shopee Flask Server Running OK (Live Mode)"
+    return "✅ Shopee Flask Test Server Running OK"
 
 @app.route("/callback")
 def callback():
-    import requests, hmac, hashlib, time, json
-
     code = request.args.get("code")
     shop_id = request.args.get("shop_id")
 
     if not code or not shop_id:
-        return "❌ Missing code or shop_id", 400
+        return jsonify({"error": "❌ Missing code or shop_id"}), 400
 
-    # === Shopee Live App Credentials ===
-    PARTNER_ID = 2013146
-    PARTNER_KEY = "shpk62586365587979465a78544c795443456242756b64645076684258616459"
-    HOST = "https://partner.shopeemobile.com"
-    PATH = "/api/v2/auth/token/get"
+    # === Step 1. Build signature ===
+    path = "/api/v2/auth/token/get"
+    timestamp = int(time.time())
+    base_string = f"{PARTNER_ID}{path}{timestamp}{code}"
+    sign = hmac.new(PARTNER_KEY.encode(), base_string.encode(), hashlib.sha256).hexdigest()
 
-    # === Step 1: Use correct UTC timestamp ===
-    timestamp = int(time.time())  # Render is UTC, this is correct
-
-    # === Step 2: Build correct base string ===
-    base_string = f"{PARTNER_ID}{PATH}{timestamp}{code}"
-
-    # === Step 3: Generate HMAC-SHA256 signature ===
-    sign = hmac.new(
-        PARTNER_KEY.encode("utf-8"),
-        base_string.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-
-    print("🔹Base string:", base_string)
-    print("🔹Sign:", sign)
-
-    # === Step 4: Build request URL ===
-    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
-
-    # === Step 5: Request access token ===
+    # === Step 2. Call Shopee API ===
+    url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
     payload = {
         "code": code,
         "shop_id": int(shop_id),
@@ -58,18 +36,19 @@ def callback():
 
     res = requests.post(url, json=payload)
     try:
-        data = res.json()
-    except Exception:
-        data = {"raw": res.text}
+        api_response = res.json()
+    except:
+        api_response = {"raw_response": res.text}
 
-    print("🧾 Response:", json.dumps(data, indent=2))
-    return data
+    # === Debug info to verify ===
+    debug = {
+        "api_response": api_response,
+        "debug_base_string": base_string,
+        "debug_sign": sign,
+        "raw_query": f"code={code}&shop_id={shop_id}"
+    }
 
-# For Render health check
-@app.route("/ping")
-def ping():
-    return "pong", 200
+    return jsonify(debug)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
-
+    app.run(debug=True)
