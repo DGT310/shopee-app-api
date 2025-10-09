@@ -15,7 +15,6 @@ TOKEN_FILE = "/mnt/data/tokens.json"  # Render persistent storage path
 # ---------- TOKEN STORAGE ----------
 
 def load_tokens():
-    """Load saved tokens from file"""
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE, "r") as f:
@@ -28,7 +27,6 @@ def load_tokens():
 
 
 def save_tokens(data):
-    """Save tokens to file"""
     try:
         with open(TOKEN_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -37,39 +35,30 @@ def save_tokens(data):
         print("⚠️ Failed to save tokens:", e)
 
 
-# Global in-memory cache
 TOKENS = load_tokens()
 
 
 # ---------- UTILITIES ----------
 
 def hmac_sha256_hex(key: str, msg: str) -> str:
-    """Generate HMAC SHA256 signature (Shopee requirement)"""
     return hmac.new(key.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-# ---------- AUTH: GET TOKEN (CALLBACK) ----------
+# ---------- AUTH: GET TOKEN ----------
 
 def token_request(code_to_use: str, shop_id: int, timestamp: int):
     PATH = "/api/v2/auth/token/get"
     base_string = f"{PARTNER_ID}{PATH}{timestamp}"
     sign = hmac_sha256_hex(PARTNER_KEY, base_string)
-
     url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
-    payload = {
-        "code": code_to_use,
-        "shop_id": shop_id,
-        "partner_id": PARTNER_ID
-    }
+    payload = {"code": code_to_use, "shop_id": shop_id, "partner_id": PARTNER_ID}
     return url, payload, base_string, sign
 
 
 @app.route("/callback")
 def callback():
-    """Handle Shopee redirect and exchange code for access token"""
     raw_code = request.args.get("code") or ""
     shop_id = request.args.get("shop_id")
-
     if not raw_code or not shop_id:
         return "❌ Missing code or shop_id", 400
 
@@ -86,7 +75,6 @@ def callback():
             "last_refresh": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
         })
         save_tokens(TOKENS)
-
         return jsonify({
             "message": "✅ Shopee token exchange success",
             "shop_id": shop_id,
@@ -95,18 +83,15 @@ def callback():
             "request_id": data.get("request_id"),
             "debug": {"base_string": base_string, "sign": sign}
         })
-    else:
-        return jsonify({"error": data}), 400
+    return jsonify({"error": data}), 400
 
 
-# ---------- REFRESH TOKEN ENDPOINT ----------
+# ---------- REFRESH TOKEN ----------
 
 @app.route("/refresh_token")
 def refresh_token():
-    """Exchange a refresh_token for a new access_token"""
     refresh_token = request.args.get("refresh_token") or TOKENS.get("refresh_token")
     shop_id = request.args.get("shop_id") or TOKENS.get("shop_id")
-
     if not refresh_token or not shop_id:
         return jsonify({"error": "Missing refresh_token or shop_id"}), 400
 
@@ -114,13 +99,8 @@ def refresh_token():
     timestamp = int(time.time())
     base_string = f"{PARTNER_ID}{PATH}{timestamp}{refresh_token}{shop_id}"
     sign = hmac_sha256_hex(PARTNER_KEY, base_string)
-
     url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
-    payload = {
-        "partner_id": PARTNER_ID,
-        "shop_id": int(shop_id),
-        "refresh_token": refresh_token
-    }
+    payload = {"partner_id": PARTNER_ID, "shop_id": int(shop_id), "refresh_token": refresh_token}
 
     res = requests.post(url, json=payload, timeout=20)
     data = res.json()
@@ -140,43 +120,57 @@ def refresh_token():
     })
 
 
-# ---------- TEST API ----------
+# ---------- POWER BI SALES DATA ----------
 
-@app.route("/test_api")
-def test_api():
-    """Test Shopee API using current access_token"""
-    access_token = request.args.get("access_token") or TOKENS.get("access_token")
-    shop_id = request.args.get("shop_id") or TOKENS.get("shop_id")
-
+@app.route("/sales_data")
+def sales_data():
+    """Return last 7 days of Shopee orders (for Power BI)"""
+    access_token = TOKENS.get("access_token")
+    shop_id = TOKENS.get("shop_id")
     if not access_token or not shop_id:
-        return jsonify({"error": "Missing access_token or shop_id"}), 400
+        return jsonify({"error": "Token missing, please reauthorize"}), 400
 
-    PATH = "/api/v2/shop/get_shop_info"
+    PATH = "/api/v2/order/get_order_list"
     timestamp = int(time.time())
     base_string = f"{PARTNER_ID}{PATH}{timestamp}{access_token}{shop_id}"
     sign = hmac_sha256_hex(PARTNER_KEY, base_string)
-
     url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}&access_token={access_token}&shop_id={shop_id}"
-    res = requests.get(url, timeout=20)
-    data = res.json()
 
-    return jsonify({
-        "message": "✅ Shopee API call success" if "response" in data else "⚠️ API call failed",
-        "response": data
-    })
+    payload = {
+        "time_range_field": "create_time",
+        "time_from": int(time.time()) - 7 * 24 * 3600,
+        "time_to": int(time.time()),
+        "page_size": 100
+    }
+
+    res = requests.post(url, json=payload, timeout=30)
+    data = res.json()
+    if "response" not in data:
+        return jsonify({"error": "Failed to fetch data", "raw": data}), 400
+
+    orders = data["response"].get("order_list", [])
+    clean = []
+    for o in orders:
+        clean.append({
+            "order_sn": o.get("order_sn"),
+            "region": o.get("region"),
+            "status": o.get("order_status"),
+            "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(o.get("create_time", 0))),
+            "update_time": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(o.get("update_time", 0))),
+            "total_amount": o.get("total_amount", 0)
+        })
+    return jsonify(clean)
 
 
 # ---------- AUTO REFRESH BACKGROUND TASK ----------
 
 def auto_refresh_loop():
-    """Automatically refresh tokens every 3 hours"""
     while True:
         if TOKENS.get("refresh_token") and TOKENS.get("shop_id"):
             print("🔄 Auto-refreshing Shopee token...")
             try:
                 res = requests.get("http://127.0.0.1:10000/refresh_token", timeout=30)
                 print("✅ Auto-refresh done at", time.strftime("%Y-%m-%d %H:%M:%S"))
-                print("Response:", res.text)
             except Exception as e:
                 print("⚠️ Auto-refresh error:", e)
         time.sleep(3 * 3600)
