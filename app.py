@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import requests, hmac, hashlib, time, json, os, pandas as pd
+import requests, hmac, hashlib, time, json
 
 app = Flask(__name__)
 
@@ -8,285 +8,94 @@ PARTNER_ID = 2013146
 PARTNER_KEY = "shpk62586365587979465a78544c795443456242756b64645076684258616459"
 HOST = "https://partner.shopeemobile.com"
 
-# === FILE PATHS (Render persistent storage) ===
-TOKEN_FILE = "/mnt/data/tokens.json"
-ORDER_FILE = "/mnt/data/sales.csv"
-ITEM_FILE = "/mnt/data/sales_items.csv"
-ESCROW_FILE = "/mnt/data/sales_gp.csv"
+@app.route("/")
+def home():
+    return "✅ Shopee Flask Server Running OK (Live Mode)"
 
-# === UTILITIES ===
-def load_tokens():
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, "r") as f:
-            return json.load(f)
-    return {}
+def hmac_sha256_hex(key: str, msg: str) -> str:
+    return hmac.new(key.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
 
-def save_tokens(data):
-    with open(TOKEN_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+def token_request(code_to_use: str, shop_id: int, timestamp: int):
+    PATH = "/api/v2/auth/token/get"
+    # ✅ Correct base string (no code)
+    base_string = f"{PARTNER_ID}{PATH}{timestamp}"
+    sign = hmac_sha256_hex(PARTNER_KEY, base_string)
 
-def sign(msg):
-    return hmac.new(PARTNER_KEY.encode(), msg.encode(), hashlib.sha256).hexdigest()
+    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
+    payload = {
+        "code": code_to_use,
+        "shop_id": shop_id,
+        "partner_id": PARTNER_ID
+    }
+    return url, payload, base_string, sign
 
-TOKENS = load_tokens()
-
-# ---------------------------------------------------------------------
-# 1️⃣  AUTHORIZATION CALLBACK (after Shopee redirects with code & shop_id)
-# ---------------------------------------------------------------------
 @app.route("/callback")
 def callback():
     """Handle Shopee redirect and exchange code for access token"""
-    code = request.args.get("code")
+    raw_code = request.args.get("code") or ""
     shop_id = request.args.get("shop_id")
 
-    if not code or not shop_id:
+    if not raw_code or not shop_id:
         return "❌ Missing code or shop_id", 400
 
-    PATH = "/api/v2/auth/token/get"
-    timestamp = int(time.time())
-    base_string = f"{PARTNER_ID}{PATH}{timestamp}"
-    s = sign(base_string)
+    # Prepare both representations
+    candidates = []
+    # 1) Use RAW code as-is (common success case)
+    candidates.append(("RAW", raw_code))
+    # 2) If hex-like, try decoded ASCII too
+    try:
+        decoded = bytes.fromhex(raw_code).decode("utf-8")
+        if decoded and decoded != raw_code:
+            candidates.append(("HEX→ASCII", decoded))
+    except Exception:
+        pass
 
-    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={s}"
-    payload = {
-        "code": code,
-        "shop_id": int(shop_id),
-        "partner_id": PARTNER_ID
-    }
+    timestamp = int(time.time())  # keep single timestamp
 
-    res = requests.post(url, json=payload)
-    data = res.json()
-
-    if "access_token" in data:
-        TOKENS.update({
-            "shop_id": int(shop_id),
-            "access_token": data["access_token"],
-            "refresh_token": data["refresh_token"],
-            "last_refresh": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-        })
-        save_tokens(TOKENS)
-        return jsonify({
-            "message": "✅ Shopee token exchange success",
-            "shop_id": shop_id,
-            "access_token": data["access_token"],
-            "refresh_token": data["refresh_token"]
-        })
-    else:
-        return jsonify({"error": data}), 400
-
-# ---------------------------------------------------------------------
-# 2️⃣  REFRESH TOKEN
-# ---------------------------------------------------------------------
-def refresh_token():
-    if not TOKENS.get("refresh_token"):
-        print("⚠️ No refresh_token found")
-        return
-    PATH = "/api/v2/auth/access_token/get"
-    timestamp = int(time.time())
-    base = f"{PARTNER_ID}{PATH}{timestamp}{TOKENS['refresh_token']}{TOKENS['shop_id']}"
-    s = sign(base)
-    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={s}"
-    payload = {
-        "partner_id": PARTNER_ID,
-        "shop_id": int(TOKENS["shop_id"]),
-        "refresh_token": TOKENS["refresh_token"]
-    }
-    r = requests.post(url, json=payload)
-    data = r.json()
-    if "access_token" in data:
-        TOKENS.update({
-            "access_token": data["access_token"],
-            "refresh_token": data["refresh_token"],
-            "last_refresh": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-        })
-        save_tokens(TOKENS)
-        print("✅ Token refreshed successfully")
-    else:
-        print("⚠️ Refresh failed:", data)
-
-# ---------------------------------------------------------------------
-# 3️⃣  FETCH ORDERS
-# ---------------------------------------------------------------------
-def fetch_orders(time_from=None):
-    PATH = "/api/v2/order/get_order_list"
-    timestamp = int(time.time())
-    base = f"{PARTNER_ID}{PATH}{timestamp}{TOKENS['access_token']}{TOKENS['shop_id']}"
-    s = sign(base)
-    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={s}&access_token={TOKENS['access_token']}&shop_id={TOKENS['shop_id']}"
-
-    if not time_from:
-        time_from = int(time.mktime(time.strptime("2020-01-01", "%Y-%m-%d")))
-    time_to = int(time.time())
-
-    all_orders, cursor = [], None
-    while True:
-        payload = {
-            "time_range_field": "create_time",
-            "time_from": time_from,
-            "time_to": time_to,
-            "page_size": 100
-        }
-        if cursor:
-            payload["cursor"] = cursor
-        res = requests.post(url, json=payload, timeout=30)
-        data = res.json()
-        if "response" not in data:
-            break
-        orders = data["response"].get("order_list", [])
-        all_orders.extend(orders)
-        if not data["response"].get("more"):
-            break
-        cursor = data["response"].get("next_cursor")
-        time.sleep(0.5)
-    return all_orders
-
-@app.route("/update_sales")
-def update_sales():
-    refresh_token()
-    orders = fetch_orders()
-    if not orders:
-        return jsonify({"message": "No orders found"})
-    clean = []
-    for o in orders:
-        clean.append({
-            "order_sn": o.get("order_sn"),
-            "region": o.get("region"),
-            "status": o.get("order_status"),
-            "total_amount": o.get("total_amount", 0),
-            "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(o.get("create_time", 0))),
-            "update_time": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(o.get("update_time", 0)))
-        })
-    df = pd.DataFrame(clean)
-    df.to_csv(ORDER_FILE, index=False)
-    print(f"💾 Saved {len(df)} orders")
-    return jsonify({"message": "✅ Orders saved", "count": len(df)})
-
-# ---------------------------------------------------------------------
-# 4️⃣  FETCH ITEM-LEVEL DETAILS
-# ---------------------------------------------------------------------
-def fetch_order_detail(order_sn):
-    PATH = "/api/v2/order/get_order_detail"
-    timestamp = int(time.time())
-    base = f"{PARTNER_ID}{PATH}{timestamp}{TOKENS['access_token']}{TOKENS['shop_id']}"
-    s = sign(base)
-    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={s}&access_token={TOKENS['access_token']}&shop_id={TOKENS['shop_id']}"
-    payload = {"order_sn_list": [order_sn]}
-    res = requests.post(url, json=payload, timeout=30)
-    data = res.json()
-    items = []
-    for d in data.get("response", {}).get("order_list", []):
-        for i in d.get("item_list", []):
-            items.append({
-                "order_sn": d.get("order_sn"),
-                "item_id": i.get("item_id"),
-                "sku": i.get("model_sku"),
-                "name": i.get("item_name"),
-                "qty": i.get("model_quantity_purchased"),
-                "price": i.get("model_discounted_price"),
-                "subtotal": i.get("model_discounted_price", 0) * i.get("model_quantity_purchased", 0),
-                "status": d.get("order_status"),
-                "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(d.get("create_time", 0)))
-            })
-    return items
-
-@app.route("/update_sales_items")
-def update_sales_items():
-    if not os.path.exists(ORDER_FILE):
-        return jsonify({"error": "No order list found. Run /update_sales first."})
-    df_orders = pd.read_csv(ORDER_FILE)
-    all_details = []
-    for sn in df_orders["order_sn"].tolist():
+    attempts = []
+    for label, candidate_code in candidates:
+        url, payload, base_string, sign = token_request(candidate_code, int(shop_id), timestamp)
+        res = requests.post(url, json=payload, timeout=20)
         try:
-            detail = fetch_order_detail(sn)
-            all_details.extend(detail)
-        except Exception as e:
-            print("⚠️ Error fetching details:", e)
-        time.sleep(0.5)
-    if not all_details:
-        return jsonify({"error": "No item details fetched"})
-    df = pd.DataFrame(all_details)
-    df.to_csv(ITEM_FILE, index=False)
-    print(f"💾 Saved {len(df)} sales item rows")
-    return jsonify({"message": "✅ Item details saved", "count": len(df)})
+            data = res.json()
+        except Exception:
+            data = {"raw": res.text}
+        attempts.append({
+            "label": label,
+            "used_code": candidate_code,
+            "base_string": base_string,
+            "sign": sign,
+            "status": res.status_code,
+            "response": data
+        })
+        # Success fast-path
+        if isinstance(data, dict) and data.get("access_token"):
+            return jsonify({
+                "message": "✅ Shopee token exchange success",
+                "variant": label,
+                "request_id": data.get("request_id"),
+                "access_token": data.get("access_token"),
+                "refresh_token": data.get("refresh_token"),
+                "shop_id": shop_id,
+                "debug": {"base_string": base_string, "sign": sign}
+            }), 200
 
-# ---------------------------------------------------------------------
-# 5️⃣  ESCROW (FEES / GP)
-# ---------------------------------------------------------------------
-def fetch_escrow(order_sn):
-    PATH = "/api/v2/payment/get_escrow_detail"
-    timestamp = int(time.time())
-    base = f"{PARTNER_ID}{PATH}{timestamp}{TOKENS['access_token']}{TOKENS['shop_id']}"
-    s = sign(base)
-    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={s}&access_token={TOKENS['access_token']}&shop_id={TOKENS['shop_id']}"
-    payload = {"order_sn": order_sn}
-    r = requests.post(url, json=payload, timeout=30)
-    d = r.json()
-    if "response" not in d:
-        return None
-    e = d["response"]
-    return {
-        "order_sn": order_sn,
-        "total_amount": e.get("order_income_detail", {}).get("buyer_payment_amount", 0),
-        "service_fee": e.get("order_income_detail", {}).get("service_fee", 0),
-        "commission_fee": e.get("order_income_detail", {}).get("commission_fee", 0),
-        "escrow_amount": e.get("order_income_detail", {}).get("escrow_amount", 0)
-    }
+        # If Shopee says wrong sign, try next variant automatically
+        if isinstance(data, dict) and data.get("error") != "error_sign":
+            # Not a sign error -> no point trying the other variant further
+            break
 
-@app.route("/update_sales_gp")
-def update_sales_gp():
-    if not os.path.exists(ORDER_FILE):
-        return jsonify({"error": "No order list found."})
-    df_orders = pd.read_csv(ORDER_FILE)
-    all_gp = []
-    for sn in df_orders["order_sn"].tolist():
-        try:
-            gp = fetch_escrow(sn)
-            if gp:
-                all_gp.append(gp)
-        except Exception as e:
-            print("⚠️ Error:", e)
-        time.sleep(0.5)
-    if not all_gp:
-        return jsonify({"error": "No GP data fetched"})
-    df = pd.DataFrame(all_gp)
-    df.to_csv(ESCROW_FILE, index=False)
-    print(f"💾 Saved {len(df)} GP rows")
-    return jsonify({"message": "✅ GP data saved", "count": len(df)})
-
-# ---------------------------------------------------------------------
-# 6️⃣  READ ENDPOINTS FOR POWER BI
-# ---------------------------------------------------------------------
-@app.route("/sales_data")
-def sales_data():
-    if not os.path.exists(ORDER_FILE):
-        return jsonify({"error": "No sales data"})
-    df = pd.read_csv(ORDER_FILE)
-    return jsonify(df.to_dict(orient="records"))
-
-@app.route("/sales_items")
-def sales_items():
-    if not os.path.exists(ITEM_FILE):
-        return jsonify({"error": "No item data"})
-    df = pd.read_csv(ITEM_FILE)
-    return jsonify(df.to_dict(orient="records"))
-
-@app.route("/sales_gp")
-def sales_gp():
-    if not os.path.exists(ESCROW_FILE):
-        return jsonify({"error": "No GP data"})
-    df = pd.read_csv(ESCROW_FILE)
-    return jsonify(df.to_dict(orient="records"))
-
-# ---------------------------------------------------------------------
-# 7️⃣  HEALTH CHECK
-# ---------------------------------------------------------------------
-@app.route("/")
-def home():
+    # If we got here, all attempts failed
     return jsonify({
-        "status": "✅ Shopee Flask Server Running OK (Live Mode)",
-        "shop_id": TOKENS.get("shop_id"),
-        "last_refresh": TOKENS.get("last_refresh")
-    })
+        "message": "❌ Shopee token exchange failed",
+        "shop_id": shop_id,
+        "attempts": attempts  # includes base_string & sign for each variant
+    }), 400
+
+# Health check
+@app.route("/ping")
+def ping():
+    return "pong", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
