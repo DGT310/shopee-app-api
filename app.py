@@ -1,57 +1,82 @@
 from flask import Flask, request, jsonify
-import requests, hmac, hashlib, time, json
+import requests, hmac, hashlib, time, json, binascii
 
 app = Flask(__name__)
 
-# === Test Environment Credentials ===
-PARTNER_ID = 1190367
-PARTNER_KEY = "shpk6f5070654e5a774a5a684f63776e7a53454e7049655767636b6a46466743"
-HOST = "https://partner.test-stable.shopeemobile.com"
+# === LIVE CREDENTIALS ===
+PARTNER_ID = 2013146
+PARTNER_KEY = "shpk62586365587979465a78544c795443456242756b64645076684258616459"
+HOST = "https://partner.shopeemobile.com"
 
 @app.route("/")
 def home():
-    return "✅ Shopee Flask Test Server Running OK"
+    return "✅ Shopee Flask Server Running OK (Live Mode)"
 
 @app.route("/callback")
 def callback():
-    code = request.args.get("code")
+    """Handle Shopee redirect and exchange code for access token"""
+    raw_code = request.args.get("code")
     shop_id = request.args.get("shop_id")
 
-    if not code or not shop_id:
-        return jsonify({"error": "❌ Missing code or shop_id"}), 400
+    if not raw_code or not shop_id:
+        return "❌ Missing code or shop_id", 400
 
-    # === Step 1. Build signature ===
-    path = "/api/v2/auth/token/get"
-    timestamp = int(time.time())
-    base_string = f"{PARTNER_ID}{path}{timestamp}{code}"
-    sign = hmac.new(PARTNER_KEY.encode(), base_string.encode(), hashlib.sha256).hexdigest()
+    # --- Try decoding Shopee's hex-encoded code ---
+    try:
+        code = bytes.fromhex(raw_code).decode()
+        print(f"🧩 Code was hex-encoded, decoded to: {code}")
+    except Exception:
+        code = raw_code
+        print(f"🧩 Code used as raw text: {code}")
 
-    # === Step 2. Call Shopee API ===
-    url = f"{HOST}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
+    # --- Build the token exchange request ---
+    PATH = "/api/v2/auth/token/get"
+    timestamp = int(time.time())  # UTC timestamp
+
+    # === Step 1: Build base string ===
+    base_string = f"{PARTNER_ID}{PATH}{timestamp}{code}"
+    print("🔹Base string:", base_string)
+
+    # === Step 2: Generate HMAC-SHA256 signature ===
+    sign = hmac.new(
+        PARTNER_KEY.encode("utf-8"),
+        base_string.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+
+    print("🔹Sign:", sign)
+
+    # === Step 3: Build request URL ===
+    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
+
+    # === Step 4: Request access token ===
     payload = {
         "code": code,
         "shop_id": int(shop_id),
         "partner_id": PARTNER_ID
     }
 
+    print("📦 Payload:", json.dumps(payload, indent=2))
+
     res = requests.post(url, json=payload)
     try:
-        api_response = res.json()
-    except:
-        api_response = {"raw_response": res.text}
+        data = res.json()
+    except Exception:
+        data = {"raw": res.text}
 
-    debug = {
-        "api_response": api_response,
-        "debug_base_string": base_string,
-        "debug_sign": sign,
-        "raw_query": f"code={code}&shop_id={shop_id}"
-    }
+    print("🧾 Response:", json.dumps(data, indent=2))
 
-    return jsonify(debug)
+    # === Step 5: Return response to browser ===
+    return jsonify({
+        "message": "Shopee token exchange complete!",
+        "request_id": data.get("request_id"),
+        "response": data
+    })
+
+# Health check route for Render
+@app.route("/ping")
+def ping():
+    return "pong", 200
 
 if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
-
-
+    app.run(host="0.0.0.0", port=10000)
