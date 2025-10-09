@@ -128,14 +128,19 @@ def sales_data():
     access_token = TOKENS.get("access_token")
     shop_id = TOKENS.get("shop_id")
     if not access_token or not shop_id:
-        print("❌ Token missing. TOKENS =", TOKENS)
+        print("❌ Token missing:", TOKENS)
         return jsonify({"error": "Token missing, please reauthorize"}), 400
 
     PATH = "/api/v2/order/get_order_list"
     timestamp = int(time.time())
     base_string = f"{PARTNER_ID}{PATH}{timestamp}{access_token}{shop_id}"
     sign = hmac_sha256_hex(PARTNER_KEY, base_string)
-    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}&access_token={access_token}&shop_id={shop_id}"
+
+    url = (
+        f"{HOST}{PATH}?partner_id={PARTNER_ID}"
+        f"&timestamp={timestamp}&sign={sign}"
+        f"&access_token={access_token}&shop_id={shop_id}"
+    )
 
     payload = {
         "time_range_field": "create_time",
@@ -144,34 +149,23 @@ def sales_data():
         "page_size": 50
     }
 
-    print("🔹 Fetching Shopee orders:", url)
+    print("🔹 Requesting Shopee API:", url)
     print("🔹 Payload:", payload)
 
     try:
         res = requests.post(url, json=payload, timeout=30)
-        print("🔹 Shopee HTTP Status:", res.status_code)
-        data = res.json()
-        print("🔹 Shopee Response:", data)
+        print("🔹 HTTP status:", res.status_code)
+        print("🔹 Raw text:", res.text[:500])  # print first 500 chars only
+        data = res.json()  # this will fail if Shopee returns HTML
     except Exception as e:
-        print("⚠️ Error contacting Shopee:", e)
-        return jsonify({"error": f"Request to Shopee failed: {str(e)}"}), 500
+        print("⚠️ JSON decode failed:", e)
+        return jsonify({
+            "error": f"Request to Shopee failed: {str(e)}",
+            "raw_response": res.text[:300]
+        }), 500
 
-    # --- Defensive checks ---
-    if not isinstance(data, dict):
-        print("⚠️ Non-JSON response from Shopee:", data)
-        return jsonify({"error": "Shopee returned non-JSON", "raw": str(data)}), 500
-    if data.get("error"):
-        print("⚠️ Shopee API error:", data)
-        return jsonify({
-            "error": f"Shopee API error: {data.get('message', 'unknown')}",
-            "raw": data
-        }), 500
-    if "response" not in data or "order_list" not in data["response"]:
-        print("⚠️ Missing expected fields in Shopee response:", data)
-        return jsonify({
-            "error": "Shopee API response missing expected fields",
-            "raw": data
-        }), 500
+    if "response" not in data:
+        return jsonify({"error": "Unexpected Shopee API response", "raw": data}), 500
 
     orders = data["response"].get("order_list", [])
     clean = []
@@ -185,7 +179,7 @@ def sales_data():
             "total_amount": o.get("total_amount", 0)
         })
 
-    print(f"✅ Returning {len(clean)} orders to Power BI.")
+    print(f"✅ Returning {len(clean)} orders.")
     return jsonify(clean)
 
 
@@ -223,4 +217,5 @@ def ping():
 if __name__ == "__main__":
     threading.Thread(target=auto_refresh_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=10000)
+
 
