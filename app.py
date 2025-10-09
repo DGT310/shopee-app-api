@@ -128,6 +128,7 @@ def sales_data():
     access_token = TOKENS.get("access_token")
     shop_id = TOKENS.get("shop_id")
     if not access_token or not shop_id:
+        print("❌ Token missing. TOKENS =", TOKENS)
         return jsonify({"error": "Token missing, please reauthorize"}), 400
 
     PATH = "/api/v2/order/get_order_list"
@@ -140,13 +141,37 @@ def sales_data():
         "time_range_field": "create_time",
         "time_from": int(time.time()) - 7 * 24 * 3600,
         "time_to": int(time.time()),
-        "page_size": 100
+        "page_size": 50
     }
 
-    res = requests.post(url, json=payload, timeout=30)
-    data = res.json()
-    if "response" not in data:
-        return jsonify({"error": "Failed to fetch data", "raw": data}), 400
+    print("🔹 Fetching Shopee orders:", url)
+    print("🔹 Payload:", payload)
+
+    try:
+        res = requests.post(url, json=payload, timeout=30)
+        print("🔹 Shopee HTTP Status:", res.status_code)
+        data = res.json()
+        print("🔹 Shopee Response:", data)
+    except Exception as e:
+        print("⚠️ Error contacting Shopee:", e)
+        return jsonify({"error": f"Request to Shopee failed: {str(e)}"}), 500
+
+    # --- Defensive checks ---
+    if not isinstance(data, dict):
+        print("⚠️ Non-JSON response from Shopee:", data)
+        return jsonify({"error": "Shopee returned non-JSON", "raw": str(data)}), 500
+    if data.get("error"):
+        print("⚠️ Shopee API error:", data)
+        return jsonify({
+            "error": f"Shopee API error: {data.get('message', 'unknown')}",
+            "raw": data
+        }), 500
+    if "response" not in data or "order_list" not in data["response"]:
+        print("⚠️ Missing expected fields in Shopee response:", data)
+        return jsonify({
+            "error": "Shopee API response missing expected fields",
+            "raw": data
+        }), 500
 
     orders = data["response"].get("order_list", [])
     clean = []
@@ -159,6 +184,8 @@ def sales_data():
             "update_time": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(o.get("update_time", 0))),
             "total_amount": o.get("total_amount", 0)
         })
+
+    print(f"✅ Returning {len(clean)} orders to Power BI.")
     return jsonify(clean)
 
 
@@ -196,3 +223,4 @@ def ping():
 if __name__ == "__main__":
     threading.Thread(target=auto_refresh_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=10000)
+
