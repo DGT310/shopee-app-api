@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, request, jsonify
 import requests, hmac, hashlib, time, json, os, pandas as pd
 
 app = Flask(__name__)
@@ -6,10 +6,9 @@ app = Flask(__name__)
 # === LIVE CREDENTIALS ===
 PARTNER_ID = 2013146
 PARTNER_KEY = "shpk62586365587979465a78544c795443456242756b64645076684258616459"
-SHOP_ID = 706762797
 HOST = "https://partner.shopeemobile.com"
 
-# === FILE PATHS ===
+# === FILE PATHS (Render persistent storage) ===
 TOKEN_FILE = "/mnt/data/tokens.json"
 ORDER_FILE = "/mnt/data/sales.csv"
 ITEM_FILE = "/mnt/data/sales_items.csv"
@@ -31,16 +30,67 @@ def sign(msg):
 
 TOKENS = load_tokens()
 
-# === REFRESH TOKEN ===
+# ---------------------------------------------------------------------
+# 1️⃣  AUTHORIZATION CALLBACK (after Shopee redirects with code & shop_id)
+# ---------------------------------------------------------------------
+@app.route("/callback")
+def callback():
+    """Handle Shopee redirect and exchange code for access token"""
+    code = request.args.get("code")
+    shop_id = request.args.get("shop_id")
+
+    if not code or not shop_id:
+        return "❌ Missing code or shop_id", 400
+
+    PATH = "/api/v2/auth/token/get"
+    timestamp = int(time.time())
+    base_string = f"{PARTNER_ID}{PATH}{timestamp}"
+    s = sign(base_string)
+
+    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={s}"
+    payload = {
+        "code": code,
+        "shop_id": int(shop_id),
+        "partner_id": PARTNER_ID
+    }
+
+    res = requests.post(url, json=payload)
+    data = res.json()
+
+    if "access_token" in data:
+        TOKENS.update({
+            "shop_id": int(shop_id),
+            "access_token": data["access_token"],
+            "refresh_token": data["refresh_token"],
+            "last_refresh": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        })
+        save_tokens(TOKENS)
+        return jsonify({
+            "message": "✅ Shopee token exchange success",
+            "shop_id": shop_id,
+            "access_token": data["access_token"],
+            "refresh_token": data["refresh_token"]
+        })
+    else:
+        return jsonify({"error": data}), 400
+
+# ---------------------------------------------------------------------
+# 2️⃣  REFRESH TOKEN
+# ---------------------------------------------------------------------
 def refresh_token():
     if not TOKENS.get("refresh_token"):
+        print("⚠️ No refresh_token found")
         return
     PATH = "/api/v2/auth/access_token/get"
     timestamp = int(time.time())
-    base = f"{PARTNER_ID}{PATH}{timestamp}{TOKENS['refresh_token']}{SHOP_ID}"
+    base = f"{PARTNER_ID}{PATH}{timestamp}{TOKENS['refresh_token']}{TOKENS['shop_id']}"
     s = sign(base)
     url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={s}"
-    payload = {"partner_id": PARTNER_ID, "shop_id": SHOP_ID, "refresh_token": TOKENS["refresh_token"]}
+    payload = {
+        "partner_id": PARTNER_ID,
+        "shop_id": int(TOKENS["shop_id"]),
+        "refresh_token": TOKENS["refresh_token"]
+    }
     r = requests.post(url, json=payload)
     data = r.json()
     if "access_token" in data:
@@ -50,17 +100,19 @@ def refresh_token():
             "last_refresh": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
         })
         save_tokens(TOKENS)
-        print("✅ Token refreshed")
+        print("✅ Token refreshed successfully")
     else:
         print("⚠️ Refresh failed:", data)
 
-# === FETCH ORDER LIST (SALES SUMMARY) ===
+# ---------------------------------------------------------------------
+# 3️⃣  FETCH ORDERS
+# ---------------------------------------------------------------------
 def fetch_orders(time_from=None):
-    PATH = "/api/v2/shop/get_order_list"
+    PATH = "/api/v2/order/get_order_list"
     timestamp = int(time.time())
-    base = f"{PARTNER_ID}{PATH}{timestamp}{TOKENS['access_token']}{SHOP_ID}"
+    base = f"{PARTNER_ID}{PATH}{timestamp}{TOKENS['access_token']}{TOKENS['shop_id']}"
     s = sign(base)
-    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={s}&access_token={TOKENS['access_token']}&shop_id={SHOP_ID}"
+    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={s}&access_token={TOKENS['access_token']}&shop_id={TOKENS['shop_id']}"
 
     if not time_from:
         time_from = int(time.mktime(time.strptime("2020-01-01", "%Y-%m-%d")))
@@ -109,13 +161,15 @@ def update_sales():
     print(f"💾 Saved {len(df)} orders")
     return jsonify({"message": "✅ Orders saved", "count": len(df)})
 
-# === FETCH ORDER DETAIL (ITEM LEVEL) ===
+# ---------------------------------------------------------------------
+# 4️⃣  FETCH ITEM-LEVEL DETAILS
+# ---------------------------------------------------------------------
 def fetch_order_detail(order_sn):
     PATH = "/api/v2/order/get_order_detail"
     timestamp = int(time.time())
-    base = f"{PARTNER_ID}{PATH}{timestamp}{TOKENS['access_token']}{SHOP_ID}"
+    base = f"{PARTNER_ID}{PATH}{timestamp}{TOKENS['access_token']}{TOKENS['shop_id']}"
     s = sign(base)
-    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={s}&access_token={TOKENS['access_token']}&shop_id={SHOP_ID}"
+    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={s}&access_token={TOKENS['access_token']}&shop_id={TOKENS['shop_id']}"
     payload = {"order_sn_list": [order_sn]}
     res = requests.post(url, json=payload, timeout=30)
     data = res.json()
@@ -155,13 +209,15 @@ def update_sales_items():
     print(f"💾 Saved {len(df)} sales item rows")
     return jsonify({"message": "✅ Item details saved", "count": len(df)})
 
-# === ESCROW (FEE / COMMISSION / GP) ===
+# ---------------------------------------------------------------------
+# 5️⃣  ESCROW (FEES / GP)
+# ---------------------------------------------------------------------
 def fetch_escrow(order_sn):
     PATH = "/api/v2/payment/get_escrow_detail"
     timestamp = int(time.time())
-    base = f"{PARTNER_ID}{PATH}{timestamp}{TOKENS['access_token']}{SHOP_ID}"
+    base = f"{PARTNER_ID}{PATH}{timestamp}{TOKENS['access_token']}{TOKENS['shop_id']}"
     s = sign(base)
-    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={s}&access_token={TOKENS['access_token']}&shop_id={SHOP_ID}"
+    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={s}&access_token={TOKENS['access_token']}&shop_id={TOKENS['shop_id']}"
     payload = {"order_sn": order_sn}
     r = requests.post(url, json=payload, timeout=30)
     d = r.json()
@@ -197,7 +253,9 @@ def update_sales_gp():
     print(f"💾 Saved {len(df)} GP rows")
     return jsonify({"message": "✅ GP data saved", "count": len(df)})
 
-# === READ ENDPOINTS (for Power BI) ===
+# ---------------------------------------------------------------------
+# 6️⃣  READ ENDPOINTS FOR POWER BI
+# ---------------------------------------------------------------------
 @app.route("/sales_data")
 def sales_data():
     if not os.path.exists(ORDER_FILE):
@@ -219,6 +277,9 @@ def sales_gp():
     df = pd.read_csv(ESCROW_FILE)
     return jsonify(df.to_dict(orient="records"))
 
+# ---------------------------------------------------------------------
+# 7️⃣  HEALTH CHECK
+# ---------------------------------------------------------------------
 @app.route("/")
 def home():
     return jsonify({
