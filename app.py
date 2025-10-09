@@ -8,12 +8,15 @@ PARTNER_ID = 2013146
 PARTNER_KEY = "shpk62586365587979465a78544c795443456242756b64645076684258616459"
 HOST = "https://partner.shopeemobile.com"
 
-@app.route("/")
-def home():
-    return "✅ Shopee Flask Server Running OK (Live Mode)"
+
+# ---------- UTILITIES ----------
 
 def hmac_sha256_hex(key: str, msg: str) -> str:
+    """Generate HMAC SHA256 signature (Shopee requirement)"""
     return hmac.new(key.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+# ---------- AUTH: GET TOKEN (CALLBACK) ----------
 
 def token_request(code_to_use: str, shop_id: int, timestamp: int):
     PATH = "/api/v2/auth/token/get"
@@ -29,6 +32,7 @@ def token_request(code_to_use: str, shop_id: int, timestamp: int):
     }
     return url, payload, base_string, sign
 
+
 @app.route("/callback")
 def callback():
     """Handle Shopee redirect and exchange code for access token"""
@@ -39,10 +43,7 @@ def callback():
         return "❌ Missing code or shop_id", 400
 
     # Prepare both representations
-    candidates = []
-    # 1) Use RAW code as-is (common success case)
-    candidates.append(("RAW", raw_code))
-    # 2) If hex-like, try decoded ASCII too
+    candidates = [("RAW", raw_code)]
     try:
         decoded = bytes.fromhex(raw_code).decode("utf-8")
         if decoded and decoded != raw_code:
@@ -50,9 +51,9 @@ def callback():
     except Exception:
         pass
 
-    timestamp = int(time.time())  # keep single timestamp
-
+    timestamp = int(time.time())
     attempts = []
+
     for label, candidate_code in candidates:
         url, payload, base_string, sign = token_request(candidate_code, int(shop_id), timestamp)
         res = requests.post(url, json=payload, timeout=20)
@@ -60,6 +61,7 @@ def callback():
             data = res.json()
         except Exception:
             data = {"raw": res.text}
+
         attempts.append({
             "label": label,
             "used_code": candidate_code,
@@ -68,7 +70,7 @@ def callback():
             "status": res.status_code,
             "response": data
         })
-        # Success fast-path
+
         if isinstance(data, dict) and data.get("access_token"):
             return jsonify({
                 "message": "✅ Shopee token exchange success",
@@ -80,23 +82,97 @@ def callback():
                 "debug": {"base_string": base_string, "sign": sign}
             }), 200
 
-        # If Shopee says wrong sign, try next variant automatically
         if isinstance(data, dict) and data.get("error") != "error_sign":
-            # Not a sign error -> no point trying the other variant further
             break
 
-    # If we got here, all attempts failed
     return jsonify({
         "message": "❌ Shopee token exchange failed",
         "shop_id": shop_id,
-        "attempts": attempts  # includes base_string & sign for each variant
+        "attempts": attempts
     }), 400
 
-# Health check
+
+# ---------- REFRESH TOKEN ENDPOINT ----------
+
+@app.route("/refresh_token")
+def refresh_token():
+    """Exchange a refresh_token for a new access_token"""
+    refresh_token = request.args.get("refresh_token")
+    shop_id = request.args.get("shop_id")
+
+    if not refresh_token or not shop_id:
+        return jsonify({"error": "Missing refresh_token or shop_id"}), 400
+
+    PATH = "/api/v2/auth/access_token/get"
+    timestamp = int(time.time())
+    base_string = f"{PARTNER_ID}{PATH}{timestamp}{refresh_token}{shop_id}"
+    sign = hmac_sha256_hex(PARTNER_KEY, base_string)
+
+    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
+    payload = {
+        "partner_id": PARTNER_ID,
+        "shop_id": int(shop_id),
+        "refresh_token": refresh_token
+    }
+
+    try:
+        res = requests.post(url, json=payload, timeout=20)
+        data = res.json()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({
+        "message": "✅ Shopee access token refreshed" if "access_token" in data else "❌ Failed to refresh token",
+        "request_id": data.get("request_id"),
+        "response": data,
+        "debug": {"base_string": base_string, "sign": sign, "url": url}
+    })
+
+
+# ---------- TEST LIVE API CALL ----------
+
+@app.route("/test_api")
+def test_api():
+    """Test live Shopee API using an access_token"""
+    access_token = request.args.get("access_token")
+    shop_id = request.args.get("shop_id")
+
+    if not access_token or not shop_id:
+        return jsonify({"error": "Missing access_token or shop_id"}), 400
+
+    PATH = "/api/v2/shop/get_shop_info"
+    timestamp = int(time.time())
+    base_string = f"{PARTNER_ID}{PATH}{timestamp}{access_token}{shop_id}"
+    sign = hmac_sha256_hex(PARTNER_KEY, base_string)
+
+    url = f"{HOST}{PATH}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}&access_token={access_token}&shop_id={shop_id}"
+
+    try:
+        res = requests.get(url, timeout=20)
+        data = res.json()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({
+        "message": "✅ Shopee API call success" if data.get("response") else "⚠️ API call returned error",
+        "url": url,
+        "response": data
+    })
+
+
+# ---------- HEALTH CHECK ----------
+
+@app.route("/")
+def home():
+    return "✅ Shopee Flask Server Running OK (Live Mode)"
+
+
 @app.route("/ping")
 def ping():
     return "pong", 200
 
+
+# ---------- RUN SERVER ----------
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
-
