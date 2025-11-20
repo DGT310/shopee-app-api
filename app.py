@@ -194,7 +194,7 @@ def get_orders_for_range(time_from: int, time_to: int):
         data = r.json()
 
         if "response" not in data:
-            break
+            raise RuntimeError(f"Shopee get_order_list returned unexpected response: {data}")
 
         resp = data["response"]
         all_orders.extend(resp.get("order_list", []))
@@ -218,12 +218,18 @@ def orders():
     if not date_from or not date_to:
         return jsonify({"error": "Missing date_from or date_to"}), 400
 
-    time_from = parse_date_to_unix(date_from)
-    time_to = parse_date_to_unix(date_to) + 86400 - 1
+    try:
+        time_from = parse_date_to_unix(date_from)
+        time_to = parse_date_to_unix(date_to) + 86400 - 1
 
-    orders = get_orders_for_range(time_from, time_to)
-    return jsonify(orders)
-
+        orders = get_orders_for_range(time_from, time_to)
+        return jsonify(orders)
+    except Exception as e:
+        # This will turn the internal error into a readable JSON
+        return jsonify({
+            "error": "server_exception",
+            "detail": str(e)
+        }), 500
 # ============================================================
 # 3️⃣ ORDER DETAILS (ITEM LIST + FULL DETAIL)
 # ============================================================
@@ -312,3 +318,4 @@ def escrow():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
