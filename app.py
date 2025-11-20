@@ -270,7 +270,8 @@ def get_orders_for_range(time_from: int, time_to: int):
         if cursor:
             payload["cursor"] = cursor
 
-        r = requests.post(url, json=payload, timeout=30)
+        # ⬇⬇⬇ changed here
+        r = requests.get(url, params=payload, timeout=30)
 
         try:
             data = r.json()
@@ -296,7 +297,6 @@ def get_orders_for_range(time_from: int, time_to: int):
         time.sleep(0.2)
 
     return all_orders
-
 
 # ============================================================
 # 2️⃣ ORDERS (HEADER)
@@ -423,4 +423,5 @@ def escrow():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
 
