@@ -13,24 +13,56 @@ app = Flask(__name__)
 # CONFIG
 # ============================================================
 PARTNER_ID = int(os.getenv("PARTNER_ID", "2013146"))
-PARTNER_KEY = os.getenv("PARTNER_KEY", "shpk62586365587979465a78544c795443456242756b64645076684258616459")
+PARTNER_KEY = os.getenv(
+    "PARTNER_KEY",
+    "shpk62586365587979465a78544c795443456242756b64645076684258616459",
+)
 HOST = "https://partner.shopeemobile.com"
 
-TOKEN_FILE = "/mnt/data/tokens.json"
+# We NO LONGER use a disk file on Render free plan.
+# Instead, we optionally read initial values from environment variables:
+#   SHOPEE_SHOP_ID
+#   SHOPEE_REFRESH_TOKEN
 
 # ============================================================
 # TOKEN UTILITIES
 # ============================================================
+
 def load_tokens():
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, "r") as f:
-            return json.load(f)
-    return {}
+    """
+    On Render free plan we cannot persist files, so we
+    - load initial shop_id + refresh_token from env (if present)
+    - access_token is obtained via refresh_access_token() when needed
+    """
+    tokens = {}
+    shop_id = os.getenv("SHOPEE_SHOP_ID")
+    refresh_token = os.getenv("SHOPEE_REFRESH_TOKEN")
+
+    if shop_id:
+        tokens["shop_id"] = int(shop_id)
+    if refresh_token:
+        tokens["refresh_token"] = refresh_token
+
+    # access_token / expire_at will be filled later
+    return tokens
+
 
 def save_tokens():
-    os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
-    with open(TOKEN_FILE, "w") as f:
-        json.dump(TOKENS, f, indent=2)
+    """
+    No-op on Render free.
+    We keep tokens only in memory.
+    If you want to persist the latest refresh_token,
+    you can read it via /status (we'll expose) and
+    manually update Render env vars.
+    """
+    print("Current tokens in memory:", json.dumps({
+        "shop_id": TOKENS.get("shop_id"),
+        "access_token": TOKENS.get("access_token"),
+        "refresh_token": TOKENS.get("refresh_token"),
+        "access_expire_at": TOKENS.get("access_expire_at"),
+        "refresh_expire_at": TOKENS.get("refresh_expire_at"),
+    }))
+
 
 def sign_msg(msg: str) -> str:
     return hmac.new(
@@ -39,7 +71,9 @@ def sign_msg(msg: str) -> str:
         hashlib.sha256
     ).hexdigest()
 
+
 TOKENS = load_tokens()
+
 
 def update_tokens_from_response(data: dict, shop_id: int):
     now = int(time.time())
@@ -54,12 +88,18 @@ def update_tokens_from_response(data: dict, shop_id: int):
     TOKENS["refresh_expire_at"] = now + int(refresh_life)
     TOKENS["last_refresh"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now))
 
+    # On free plan we just log them; not writing anywhere persistent
     save_tokens()
+
 
 def refresh_access_token():
     """Refresh the access token using refresh_token."""
     if not TOKENS.get("refresh_token") or not TOKENS.get("shop_id"):
-        raise RuntimeError("❌ No refresh_token or shop_id stored. Re-authorize via /callback")
+        raise RuntimeError(
+            "❌ No refresh_token or shop_id. "
+            "Either set SHOPEE_SHOP_ID & SHOPEE_REFRESH_TOKEN in env, "
+            "or re-authorize via /callback."
+        )
 
     PATH = "/api/v2/auth/access_token/get"
     ts = int(time.time())
@@ -70,7 +110,7 @@ def refresh_access_token():
     payload = {
         "partner_id": PARTNER_ID,
         "shop_id": int(TOKENS["shop_id"]),
-        "refresh_token": TOKENS["refresh_token"]
+        "refresh_token": TOKENS["refresh_token"],
     }
 
     r = requests.post(url, json=payload, timeout=20)
@@ -82,17 +122,32 @@ def refresh_access_token():
     update_tokens_from_response(data, int(TOKENS["shop_id"]))
     print("✅ Access token refreshed successfully")
 
+
 def ensure_access_token() -> str:
-    """Ensure the access_token is valid; refresh if expiring."""
+    """
+    Ensure the access_token is valid.
+    If missing, but we have refresh_token + shop_id, we refresh it.
+    """
     now = int(time.time())
 
-    if not TOKENS.get("access_token") or not TOKENS.get("shop_id"):
-        raise RuntimeError("❌ No access_token/shop_id. Run authorization first via /callback")
+    # Must at least know shop_id
+    if not TOKENS.get("shop_id"):
+        raise RuntimeError(
+            "❌ No shop_id in TOKENS. "
+            "Authorize via /callback OR set SHOPEE_SHOP_ID & SHOPEE_REFRESH_TOKEN in env."
+        )
 
+    # If we don't have an access_token yet, try to refresh
+    if not TOKENS.get("access_token"):
+        refresh_access_token()
+        return TOKENS["access_token"]
+
+    # If we do have one, but it is close to expiry, refresh
     if now > TOKENS.get("access_expire_at", 0) - 60:
         refresh_access_token()
 
     return TOKENS["access_token"]
+
 
 def signed_shop_url(path: str) -> str:
     """Build signed URL for all shop-level APIs."""
@@ -112,29 +167,49 @@ def signed_shop_url(path: str) -> str:
         f"&shop_id={shop_id}"
     )
 
+
 def parse_date_to_unix(d: str) -> int:
     dt = datetime.strptime(d, "%Y-%m-%d")
     return int(dt.timestamp())
 
+
 # ============================================================
-# HEALTH CHECK
+# HEALTH / STATUS
 # ============================================================
+
 @app.route("/")
 def home():
     return jsonify({
         "status": "ok",
         "shop_id": TOKENS.get("shop_id"),
         "has_tokens": bool(TOKENS.get("access_token")),
-        "last_refresh": TOKENS.get("last_refresh")
+        "has_refresh_token": bool(TOKENS.get("refresh_token")),
+        "last_refresh": TOKENS.get("last_refresh"),
     })
+
 
 @app.route("/ping")
 def ping():
     return "pong", 200
 
+
+@app.route("/status")
+def status():
+    """Debug endpoint to see current tokens (NEVER expose in public in production)."""
+    return jsonify({
+        "shop_id": TOKENS.get("shop_id"),
+        "access_token": TOKENS.get("access_token"),
+        "refresh_token": TOKENS.get("refresh_token"),
+        "access_expire_at": TOKENS.get("access_expire_at"),
+        "refresh_expire_at": TOKENS.get("refresh_expire_at"),
+        "last_refresh": TOKENS.get("last_refresh"),
+    })
+
+
 # ============================================================
-# 1️⃣ AUTH CALLBACK – RUN THIS ONCE
+# 1️⃣ AUTH CALLBACK – RUN THIS TO GET FIRST TOKENS
 # ============================================================
+
 @app.route("/callback")
 def callback():
     code = request.args.get("code")
@@ -152,7 +227,7 @@ def callback():
     payload = {
         "code": code,
         "shop_id": int(shop_id),
-        "partner_id": PARTNER_ID
+        "partner_id": PARTNER_ID,
     }
 
     r = requests.post(url, json=payload, timeout=20)
@@ -163,16 +238,21 @@ def callback():
 
     update_tokens_from_response(data, int(shop_id))
 
+    # IMPORTANT: copy shop_id + refresh_token from here into Render env
     return jsonify({
         "message": "✅ Shopee token exchange success",
         "shop_id": shop_id,
         "access_token": data["access_token"],
-        "refresh_token": data["refresh_token"]
+        "refresh_token": data["refresh_token"],
+        "note": "For persistence on Render free, set SHOPEE_SHOP_ID and "
+                "SHOPEE_REFRESH_TOKEN env vars using the values above."
     })
+
 
 # ============================================================
 # SHARED ORDER LIST FETCHER
 # ============================================================
+
 def get_orders_for_range(time_from: int, time_to: int):
     PATH = "/api/v2/order/get_order_list"
     url = signed_shop_url(PATH)
@@ -185,7 +265,7 @@ def get_orders_for_range(time_from: int, time_to: int):
             "time_range_field": "create_time",
             "time_from": time_from,
             "time_to": time_to,
-            "page_size": 100
+            "page_size": 100,
         }
         if cursor:
             payload["cursor"] = cursor
@@ -194,7 +274,7 @@ def get_orders_for_range(time_from: int, time_to: int):
         data = r.json()
 
         if "response" not in data:
-            raise RuntimeError(f"Shopee get_order_list returned unexpected response: {data}")
+            raise RuntimeError(f"Shopee get_order_list unexpected response: {data}")
 
         resp = data["response"]
         all_orders.extend(resp.get("order_list", []))
@@ -207,9 +287,11 @@ def get_orders_for_range(time_from: int, time_to: int):
 
     return all_orders
 
+
 # ============================================================
 # 2️⃣ ORDERS (HEADER)
 # ============================================================
+
 @app.route("/orders")
 def orders():
     date_from = request.args.get("date_from")
@@ -225,14 +307,16 @@ def orders():
         orders = get_orders_for_range(time_from, time_to)
         return jsonify(orders)
     except Exception as e:
-        # This will turn the internal error into a readable JSON
         return jsonify({
             "error": "server_exception",
-            "detail": str(e)
+            "detail": str(e),
         }), 500
+
+
 # ============================================================
 # 3️⃣ ORDER DETAILS (ITEM LIST + FULL DETAIL)
 # ============================================================
+
 def get_order_details_for_sns(order_sns):
     PATH = "/api/v2/order/get_order_detail"
     url = signed_shop_url(PATH)
@@ -241,7 +325,7 @@ def get_order_details_for_sns(order_sns):
     batch_size = 50
 
     for i in range(0, len(order_sns), batch_size):
-        batch = order_sns[i:i+batch_size]
+        batch = order_sns[i:i + batch_size]
         payload = {"order_sn_list": batch}
 
         r = requests.post(url, json=payload, timeout=30)
@@ -254,10 +338,14 @@ def get_order_details_for_sns(order_sns):
 
     return all_details
 
+
 @app.route("/order_details")
 def order_details():
     date_from = request.args.get("date_from")
     date_to = request.args.get("date_to")
+
+    if not date_from or not date_to:
+        return jsonify({"error": "Missing date_from or date_to"}), 400
 
     time_from = parse_date_to_unix(date_from)
     time_to = parse_date_to_unix(date_to) + 86400 - 1
@@ -271,9 +359,11 @@ def order_details():
     details = get_order_details_for_sns(order_sns)
     return jsonify(details)
 
+
 # ============================================================
 # 4️⃣ ESCROW (FEES / INCOME)
 # ============================================================
+
 def get_escrow_for_sns(order_sns):
     PATH = "/api/v2/payment/get_escrow_detail"
     url = signed_shop_url(PATH)
@@ -294,10 +384,14 @@ def get_escrow_for_sns(order_sns):
 
     return results
 
+
 @app.route("/escrow")
 def escrow():
     date_from = request.args.get("date_from")
     date_to = request.args.get("date_to")
+
+    if not date_from or not date_to:
+        return jsonify({"error": "Missing date_from or date_to"}), 400
 
     time_from = parse_date_to_unix(date_from)
     time_to = parse_date_to_unix(date_to) + 86400 - 1
@@ -315,7 +409,7 @@ def escrow():
 # ============================================================
 # MAIN
 # ============================================================
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
-
