@@ -333,17 +333,18 @@ def get_order_details_for_sns(order_sns):
     batch_size = 50
 
     for i in range(0, len(order_sns), batch_size):
-        payload = {"order_sn_list": order_sns[i:i+batch_size]}
-        try:
-            r = requests.post(url, json=payload, timeout=60)
-            data = safe_json_request(r, "get_order_detail")
-            results.extend(data["response"].get("order_list", []))
-        except Exception as e:
-            # Log and skip this batch instead of crashing the whole endpoint
-            print(f"⚠ get_order_detail batch failed for {payload}: {e}")
+        batch = order_sns[i:i + batch_size]
+        payload = {"order_sn_list": batch}
+
+        r = requests.post(url, json=payload, timeout=60)
+        # if Shopee returns error / weird JSON, this will raise
+        data = safe_json_request(r, "get_order_detail")
+
+        results.extend(data["response"].get("order_list", []))
         time.sleep(0.2)
 
     return results
+
 
 
 @app.route("/order_details")
@@ -437,3 +438,4 @@ def escrow():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
