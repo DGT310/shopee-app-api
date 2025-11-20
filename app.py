@@ -145,7 +145,12 @@ def signed_shop_url(path: str) -> str:
 # SHOPEE SAFE JSON PARSER (Used by ALL API calls)
 # ============================================================
 
-def safe_json_request(req, endpoint_name):
+def safe_json_request(req, endpoint_name, treat_invalid_time_as_empty=False):
+    """
+    Parse JSON; raise with good message on unexpected format.
+    If treat_invalid_time_as_empty=True and Shopee returns
+    order.order_list_invalid_time, we convert to empty list.
+    """
     try:
         data = req.json()
     except Exception as je:
@@ -154,11 +159,16 @@ def safe_json_request(req, endpoint_name):
             f"(status={req.status_code}, url={req.url}): {req.text}"
         ) from je
 
-    # If Shopee returns a known "invalid time" error, treat as no data
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"{endpoint_name} returned non-dict JSON "
+            f"(status={req.status_code}, url={req.url}): {data}"
+        )
+
+    # For order list: special-case invalid time error
     if "response" not in data:
         err = data.get("error")
-        if err == "order.order_list_invalid_time":
-            # behave as if there were simply no orders
+        if treat_invalid_time_as_empty and err == "order.order_list_invalid_time":
             return {"response": {"order_list": [], "more": False}}
 
         # Any other unexpected shape → bubble up
@@ -188,6 +198,11 @@ def home():
 @app.route("/status")
 def status():
     return jsonify(TOKENS)
+
+
+@app.route("/ping")
+def ping():
+    return "pong", 200
 
 
 # ============================================================
@@ -262,7 +277,11 @@ def get_orders_for_range(time_from: int, time_to: int):
                 payload["cursor"] = cursor
 
             r = requests.get(url, params=payload, timeout=30)
-            data = safe_json_request(r, "get_order_list")
+            data = safe_json_request(
+                r,
+                "get_order_list",
+                treat_invalid_time_as_empty=True
+            )
 
             resp = data["response"]
             all_orders.extend(resp.get("order_list", []))
@@ -315,10 +334,13 @@ def get_order_details_for_sns(order_sns):
 
     for i in range(0, len(order_sns), batch_size):
         payload = {"order_sn_list": order_sns[i:i+batch_size]}
-        r = requests.post(url, json=payload, timeout=30)
-        data = safe_json_request(r, "get_order_detail")
-
-        results.extend(data["response"].get("order_list", []))
+        try:
+            r = requests.post(url, json=payload, timeout=60)
+            data = safe_json_request(r, "get_order_detail")
+            results.extend(data["response"].get("order_list", []))
+        except Exception as e:
+            # Log and skip this batch instead of crashing the whole endpoint
+            print(f"⚠ get_order_detail batch failed for {payload}: {e}")
         time.sleep(0.2)
 
     return results
@@ -340,8 +362,9 @@ def order_details():
         if not orders:
             return jsonify([])
 
-        sns = [o["order_sn"] for o in orders]
-        return jsonify(get_order_details_for_sns(sns))
+        sns = [o.get("order_sn") for o in orders if o.get("order_sn")]
+        details = get_order_details_for_sns(sns)
+        return jsonify(details)
 
     except Exception as e:
         import traceback
@@ -363,12 +386,15 @@ def get_escrow_for_sns(order_sns):
     results = []
 
     for sn in order_sns:
-        r = requests.post(url, json={"order_sn": sn}, timeout=20)
-        data = safe_json_request(r, "get_escrow_detail")
-
-        row = {"order_sn": sn}
-        row.update(data["response"])
-        results.append(row)
+        payload = {"order_sn": sn}
+        try:
+            r = requests.post(url, json=payload, timeout=30)
+            data = safe_json_request(r, "get_escrow_detail")
+            row = {"order_sn": sn}
+            row.update(data["response"])
+            results.append(row)
+        except Exception as e:
+            print(f"⚠ get_escrow_detail failed for {sn}: {e}")
         time.sleep(0.2)
 
     return results
@@ -387,12 +413,13 @@ def escrow():
         t2 = int(datetime.strptime(d2, "%Y-%m-%d").timestamp()) + 86399
 
         orders = get_orders_for_range(t1, t2)
-        sns = [o["order_sn"] for o in orders]
+        sns = [o.get("order_sn") for o in orders if o.get("order_sn")]
 
         if not sns:
             return jsonify([])
 
-        return jsonify(get_escrow_for_sns(sns))
+        escrow_rows = get_escrow_for_sns(sns)
+        return jsonify(escrow_rows)
 
     except Exception as e:
         import traceback
@@ -410,4 +437,3 @@ def escrow():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
-
