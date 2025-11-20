@@ -154,7 +154,14 @@ def safe_json_request(req, endpoint_name):
             f"(status={req.status_code}, url={req.url}): {req.text}"
         ) from je
 
+    # If Shopee returns a known "invalid time" error, treat as no data
     if "response" not in data:
+        err = data.get("error")
+        if err == "order.order_list_invalid_time":
+            # behave as if there were simply no orders
+            return {"response": {"order_list": [], "more": False}}
+
+        # Any other unexpected shape → bubble up
         raise RuntimeError(
             f"{endpoint_name} unexpected structure "
             f"(status={req.status_code}, url={req.url}): {data}"
@@ -225,33 +232,49 @@ def callback():
 # ============================================================
 
 def get_orders_for_range(time_from: int, time_to: int):
+    """
+    Fetch orders for an arbitrary UNIX time range.
+    Shopee limits each call to max 15 days,
+    so we split the range into 15-day windows and merge results.
+    """
     PATH = "/api/v2/order/get_order_list"
-    url = signed_shop_url(PATH)
-
     all_orders = []
-    cursor = None
 
-    while True:
-        payload = {
-            "time_range_field": "create_time",
-            "time_from": time_from,
-            "time_to": time_to,
-            "page_size": 100,
-        }
-        if cursor:
-            payload["cursor"] = cursor
+    # 15 days in seconds
+    max_span = 15 * 24 * 60 * 60 - 1  # 15 days minus 1 second
 
-        r = requests.get(url, params=payload, timeout=30)
-        data = safe_json_request(r, "get_order_list")
+    current_from = time_from
 
-        resp = data["response"]
-        all_orders.extend(resp.get("order_list", []))
+    while current_from <= time_to:
+        current_to = min(current_from + max_span, time_to)
 
-        if not resp.get("more"):
-            break
+        url = signed_shop_url(PATH)
+        cursor = None
 
-        cursor = resp.get("next_cursor")
-        time.sleep(0.2)
+        while True:
+            payload = {
+                "time_range_field": "create_time",
+                "time_from": current_from,
+                "time_to": current_to,
+                "page_size": 100,
+            }
+            if cursor:
+                payload["cursor"] = cursor
+
+            r = requests.get(url, params=payload, timeout=30)
+            data = safe_json_request(r, "get_order_list")
+
+            resp = data["response"]
+            all_orders.extend(resp.get("order_list", []))
+
+            if not resp.get("more"):
+                break
+
+            cursor = resp.get("next_cursor")
+            time.sleep(0.2)
+
+        # move to next window (next second after current_to)
+        current_from = current_to + 1
 
     return all_orders
 
@@ -387,3 +410,4 @@ def escrow():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
