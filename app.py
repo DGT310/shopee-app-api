@@ -271,10 +271,20 @@ def get_orders_for_range(time_from: int, time_to: int):
             payload["cursor"] = cursor
 
         r = requests.post(url, json=payload, timeout=30)
-        data = r.json()
+
+        try:
+            data = r.json()
+        except Exception as je:
+            raise RuntimeError(
+                f"Shopee get_order_list invalid JSON "
+                f"(status {r.status_code}): {r.text}"
+            ) from je
 
         if "response" not in data:
-            raise RuntimeError(f"Shopee get_order_list unexpected response: {data}")
+            raise RuntimeError(
+                f"Shopee get_order_list unexpected structure "
+                f"(status {r.status_code}): {data}"
+            )
 
         resp = data["response"]
         all_orders.extend(resp.get("order_list", []))
@@ -413,3 +423,4 @@ def escrow():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
