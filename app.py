@@ -41,7 +41,7 @@ def load_tokens():
 
 
 def save_tokens():
-    """No file storage; just print so user can update ENV manually."""
+    """No file storage; just print so you can update ENV manually if needed."""
     print("Current tokens:", {
         "shop_id": TOKENS.get("shop_id"),
         "access_token": TOKENS.get("access_token"),
@@ -124,6 +124,10 @@ def ensure_access_token() -> str:
 
 
 def signed_shop_url(path: str) -> str:
+    """
+    Build signed base URL for all shop-level APIs.
+    You still pass extra parameters via requests.get(..., params=payload).
+    """
     ts = int(time.time())
     access_token = ensure_access_token()
     shop_id = TOKENS["shop_id"]
@@ -165,13 +169,11 @@ def safe_json_request(req, endpoint_name, treat_invalid_time_as_empty=False):
             f"(status={req.status_code}, url={req.url}): {data}"
         )
 
-    # For order list: special-case invalid time error
     if "response" not in data:
         err = data.get("error")
         if treat_invalid_time_as_empty and err == "order.order_list_invalid_time":
             return {"response": {"order_list": [], "more": False}}
 
-        # Any other unexpected shape → bubble up
         raise RuntimeError(
             f"{endpoint_name} unexpected structure "
             f"(status={req.status_code}, url={req.url}): {data}"
@@ -255,9 +257,7 @@ def get_orders_for_range(time_from: int, time_to: int):
     PATH = "/api/v2/order/get_order_list"
     all_orders = []
 
-    # 15 days in seconds
     max_span = 15 * 24 * 60 * 60 - 1  # 15 days minus 1 second
-
     current_from = time_from
 
     while current_from <= time_to:
@@ -292,7 +292,6 @@ def get_orders_for_range(time_from: int, time_to: int):
             cursor = resp.get("next_cursor")
             time.sleep(0.2)
 
-        # move to next window (next second after current_to)
         current_from = current_to + 1
 
     return all_orders
@@ -322,29 +321,43 @@ def orders():
 
 
 # ============================================================
-# FETCH ORDER DETAILS
+# FETCH ORDER DETAILS (ITEM LIST + FULL DETAIL)
 # ============================================================
 
 def get_order_details_for_sns(order_sns):
+    """
+    Call GET /api/v2/order/get_order_detail with comma-separated order_sn_list.
+    """
     PATH = "/api/v2/order/get_order_detail"
     url = signed_shop_url(PATH)
-
     results = []
     batch_size = 50
 
+    # Optional fields – you can adjust this string based on what you need
+    optional_fields = (
+        "buyer_user_id,buyer_username,estimated_shipping_fee,recipient_address,"
+        "actual_shipping_fee,goods_to_declare,note,item_list,pay_time,"
+        "payment_method,total_amount,shipping_carrier,package_list"
+    )
+
     for i in range(0, len(order_sns), batch_size):
         batch = order_sns[i:i + batch_size]
-        payload = {"order_sn_list": batch}
+        if not batch:
+            continue
 
-        r = requests.post(url, json=payload, timeout=60)
-        # if Shopee returns error / weird JSON, this will raise
+        payload = {
+            # Shopee expects a comma-separated string for GET
+            "order_sn_list": ",".join(batch),
+            "response_optional_fields": optional_fields,
+        }
+
+        r = requests.get(url, params=payload, timeout=60)
         data = safe_json_request(r, "get_order_detail")
 
         results.extend(data["response"].get("order_list", []))
         time.sleep(0.2)
 
     return results
-
 
 
 @app.route("/order_details")
@@ -364,6 +377,9 @@ def order_details():
             return jsonify([])
 
         sns = [o.get("order_sn") for o in orders if o.get("order_sn")]
+        if not sns:
+            return jsonify([])
+
         details = get_order_details_for_sns(sns)
         return jsonify(details)
 
@@ -381,6 +397,9 @@ def order_details():
 # ============================================================
 
 def get_escrow_for_sns(order_sns):
+    """
+    Call GET /api/v2/payment/get_escrow_detail for each order_sn.
+    """
     PATH = "/api/v2/payment/get_escrow_detail"
     url = signed_shop_url(PATH)
 
@@ -389,12 +408,13 @@ def get_escrow_for_sns(order_sns):
     for sn in order_sns:
         payload = {"order_sn": sn}
         try:
-            r = requests.post(url, json=payload, timeout=30)
+            r = requests.get(url, params=payload, timeout=30)
             data = safe_json_request(r, "get_escrow_detail")
             row = {"order_sn": sn}
             row.update(data["response"])
             results.append(row)
         except Exception as e:
+            # Log but continue with other orders
             print(f"⚠ get_escrow_detail failed for {sn}: {e}")
         time.sleep(0.2)
 
@@ -438,4 +458,3 @@ def escrow():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
-
